@@ -220,16 +220,34 @@ function deferredHost(host) {
   return { release: async () => { while (gates.length) await gates.shift()(); } };
 }
 
-test("Stop during a type-with-submit's fill, then a new message before the fill returns: no Enter ever reaches the page", async () => {
+const { TurnLedger, providerTurnKey } = await import("../runtime/src/turnLedger.ts");
+
+async function turnFor(ledger, run, ordinal, messageId, toolUseId, tool) {
+  ledger.allow(CHAT, messageId);
+  ledger.launched({ threadId: CHAT, runId: run, providerTurn: providerTurnKey("pt", ordinal), session: "s", messageId });
+  ledger.noteToolItem({ runId: run, nativeId: toolUseId, name: `mcp__t3-code__${tool}` });
+  const found = await ledger.attribute(CHAT, { toolUseId, tool }, 50);
+  assert.ok(found.ok, `${run} is live`);
+  return found.turn;
+}
+
+test("Stop during a type-with-submit, a new turn starts, then the old fill's reply arrives successfully: no Enter, and the new turn's own tools work", async () => {
   const host = world({ grouped: true });
   const c = context(host, { answer: "allow" });
-  const gate = deferredHost(host);
-  const typing = Tools.type(c.ctx, CHAT, "doc", "@e2", "hello", true);
-  await new Promise((r) => setTimeout(r, 5));
-  c.ledger.stop(CHAT);
-  await gate.release();
+  const ledger = new TurnLedger();
+  const oldTurn = await turnFor(ledger, "run-1", 1, "m-1", "toolu_type", "ardia_type");
+  const browse = host.browse;
+  let replyToFill = null;
+  host.browse = (tabId, argv) => (argv[0] === "fill" ? new Promise((resolve) => (replyToFill = () => resolve(browse(tabId, argv)))) : browse(tabId, argv));
+  const typing = Tools.type({ ...c.ctx, turn: oldTurn }, CHAT, "doc", "@e2", "hello", true);
+  while (!replyToFill) await new Promise((r) => setTimeout(r, 1));
+  ledger.stop(CHAT);
+  const newTurn = await turnFor(ledger, "run-2", 2, "m-2", "toolu_click", "ardia_click");
+  replyToFill();
   await assert.rejects(typing, (e) => e.code === "stopped");
-  assert.ok(!host.calls.some((x) => x[0] === "browse" && x[2] === "press"), "Enter never reaches the page");
+  await Tools.click({ ...c.ctx, turn: newTurn }, CHAT, "doc", "@e9");
+  const actions = host.calls.filter((x) => x[0] === "browse").map((x) => [x[2], x[3]]);
+  assert.deepEqual(actions, [["fill", "@e2"], ["click", "@e9"]], "the old turn's Enter never reaches the page; the new turn's click does");
 });
 
 test("a click chain from a stopped turn can't take its next step after a new message starts another turn", async () => {
@@ -240,4 +258,19 @@ test("a click chain from a stopped turn can't take its next step after a new mes
   await assert.rejects(Tools.click(c.ctx, CHAT, "doc", "@e2"), (e) => e.code === "stopped");
   assert.deepEqual(host.calls.filter((x) => x[0] === "browse").map((x) => x[3]), ["@e1"], "only the click before Stop happened");
   assert.deepEqual(host.calls.filter((x) => x[0] === "banner").at(-1), ["banner", "doc", null], "the banner is cleared");
+});
+
+test("a tab that opened but couldn't join the chat's group is reported, with its id, instead of failing the call", async () => {
+  const host = world({ grouped: true });
+  const c = context(host);
+  host.groupWithChat = async () => Promise.reject(new Error("The group didn't stay."));
+  const r = await Tools.openTab(c.ctx, CHAT, "https://example.com", "chat", false);
+  assert.equal(r.tab, "new1");
+  assert.equal(r.inChatGroup, false);
+  assert.equal(r.group, null);
+  assert.match(r.note, /opened but couldn't join this chat's group \(The group didn't stay\.\)/);
+  const stopped = world({ grouped: true });
+  const s = context(stopped);
+  stopped.groupWithChat = async () => (s.ledger.stop(), Promise.reject(new Error("aborted")));
+  await assert.rejects(Tools.openTab(s.ctx, CHAT, "https://example.com", "chat", false), (e) => e.code === "stopped" && /already opened tab new1/.test(e.message));
 });

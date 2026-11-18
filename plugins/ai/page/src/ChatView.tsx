@@ -259,7 +259,14 @@ export function ChatView({ chatId, contextTab, initialPrompt }: { chatId: string
       >
         <div className="column">
           {screen === "empty" ? (
-            <EmptyState suggestions={suggestionsFor(contextWithUrl, tabList)} tabs={tabs} onPick={(s) => model && void send(s.text, s.tag ? [s.tag] : [], model)} />
+            <>
+              <EmptyState suggestions={suggestionsFor(contextWithUrl, tabList)} tabs={tabs} onPick={(s) => model && void send(s.text, s.tag ? [s.tag] : [], model)} />
+              {sendError && (
+                <div className="slot">
+                  <div className="status error" data-testid="send-error">{sendError}</div>
+                </div>
+              )}
+            </>
           ) : (
             <div className="thread" data-testid="thread" data-screen={screen}>
               {items.map((item, i) => {

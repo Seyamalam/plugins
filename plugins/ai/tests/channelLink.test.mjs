@@ -173,3 +173,21 @@ test("sends past the per-second budget wait instead of being dropped by the host
   assert.ok(f.sent.length > SENDS_PER_SECOND, "the rest go out the next second");
   link.close();
 });
+
+test("a signal reused for every poll keeps no listener once each request settles", async () => {
+  const f = fakeBridge();
+  const link = new ChannelLink(f.bridge, fakeTimers().timers, P);
+  let listeners = 0;
+  const signal = { aborted: false, addEventListener: () => listeners++, removeEventListener: () => listeners-- };
+  for (let i = 0; i < 5; i++) {
+    const waiting = link.api("GET", "/ardia/events?chat=c", undefined, signal);
+    f.deliver({ t: "result", p: P, id: sentOf(f, "api").at(-1).id, ok: true, value: i });
+    assert.equal(await waiting, i);
+  }
+  const failing = link.api("GET", "/ardia/events?chat=c", undefined, signal);
+  f.deliver({ t: "result", p: P, id: sentOf(f, "api").at(-1).id, ok: false, error: "no" });
+  await assert.rejects(failing);
+  link.api("GET", "/ardia/events?chat=c", undefined, signal).catch(() => {});
+  link.close();
+  assert.equal(listeners, 0);
+});

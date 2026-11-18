@@ -214,12 +214,21 @@ export async function openTab(ctx: ToolContext, chatId: string, url: string, gro
   ctx.memory.noteOpened(chatId, opened.tabId, originOf(url));
   if (decision.outcome === "allow") ctx.onUse?.({ tool: "open_tab", kind: "open", outcome: "allowed" });
   let placed: string | null = null;
+  let groupProblem: string | null = null;
+  const alreadyOpened = (failure: ToolFailure) => new ToolFailure(failure.code, `${failure.message} It had already opened tab ${opened.tabId}, which stays open.`);
   if (group === "chat" && snap.place.group) {
-    turnGuard(ctx);
-    placed = (await ctx.host.groupWithChat(chatTab.id, [opened.tabId], ctx.turn.signal)).group;
+    if (ctx.turn.signal.aborted) throw alreadyOpened(turnFailure(ctx.turn.signal));
+    try {
+      placed = (await ctx.host.groupWithChat(chatTab.id, [opened.tabId], ctx.turn.signal)).group;
+    } catch (error) {
+      if (ctx.turn.signal.aborted) throw alreadyOpened(turnFailure(ctx.turn.signal));
+      groupProblem = error instanceof Error ? error.message : String(error);
+    }
   }
   const inChatGroup = !!snap.place.group && placed === snap.place.group;
-  const note = inChatGroup
+  const note = groupProblem
+    ? `The tab opened but couldn't join this chat's group (${groupProblem}), so it's outside the group. Don't open it again.`
+    : inChatGroup
     ? "The tab is in this chat's group."
     : group === "chat" && snap.place.split
       ? "The tab is NOT in a group: this chat is in a Split View and has no group yet."

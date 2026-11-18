@@ -1,5 +1,5 @@
 // @effect-diagnostics globalTimers:off globalDate:off
-import { Assembler, HELPER_TO_PAGE_LIMIT, INSTANCE, split, type Frame } from "./frames.ts";
+import { Assembler, HELPER_TO_PAGE_LIMIT, INSTANCE, sentSize, split, type Frame } from "./frames.ts";
 
 export const PAGE_CALLS = new Set([
   "orchestration.dispatchCommand",
@@ -12,6 +12,7 @@ export const PAGE_CALLS = new Set([
 export const PAGE_STREAMS = new Set(["orchestration.subscribeShell", "orchestration.subscribeThread"]);
 export const OUTBOX_BYTES = 4 * 1024 * 1024;
 export const INSTANCE_IDLE_MS = 60_000;
+export const FORGOTTEN_LIMIT = 1_000;
 const BACKOFF_FIRST_MS = 100;
 const BACKOFF_MAX_MS = 2_000;
 const BATCH_MS = 16;
@@ -58,6 +59,7 @@ function frameOf(data: unknown): Frame | null {
 
 export class PageBridge {
   private readonly instances = new Map<string, Instance>();
+  private readonly forgotten = new Set<string>();
   private readonly assembler = new Assembler();
   private readonly deps: BridgeDeps;
   private readonly now: () => number;
@@ -114,7 +116,8 @@ export class PageBridge {
   private instanceFor(id: string, view: string): Instance {
     let instance = this.instances.get(id);
     if (!instance) {
-      instance = { id, view, moved: false, lastSeen: this.now(), streams: new Map(), apis: new Map(), batches: new Map(), batchTimer: null, outbox: [], outboxBytes: 0, pumping: false };
+      const moved = this.forgotten.delete(id);
+      instance = { id, view, moved, lastSeen: this.now(), streams: new Map(), apis: new Map(), batches: new Map(), batchTimer: null, outbox: [], outboxBytes: 0, pumping: false };
       this.instances.set(id, instance);
       return instance;
     }
@@ -151,6 +154,8 @@ export class PageBridge {
       if (now - instance.lastSeen <= INSTANCE_IDLE_MS) continue;
       this.forget(instance);
       this.instances.delete(id);
+      this.forgotten.add(id);
+      if (this.forgotten.size > FORGOTTEN_LIMIT) this.forgotten.delete(this.forgotten.values().next().value!);
     }
   }
 
@@ -194,8 +199,8 @@ export class PageBridge {
       (item) => this.queueItem(instance, id, item),
       (error) => {
         if (instance.streams.get(id) !== stop) return;
-        instance.streams.delete(id);
         this.flushBatches(instance);
+        instance.streams.delete(id);
         this.send(instance, error ? { t: "end", p: instance.id, id, error: errorText(error) } : { t: "end", p: instance.id, id });
       },
     );
@@ -218,13 +223,13 @@ export class PageBridge {
     instance.batchTimer = null;
     const batches = [...instance.batches];
     instance.batches.clear();
-    for (const [id, items] of batches) if (items.length) this.send(instance, { t: "items", p: instance.id, id, items });
+    for (const [id, items] of batches) if (items.length && instance.streams.has(id)) this.send(instance, { t: "items", p: instance.id, id, items });
   }
 
   private send(instance: Instance, frame: Frame) {
     let n = 0;
     for (const part of split(frame, HELPER_TO_PAGE_LIMIT, () => `${instance.id}-h${++n}-${this.now()}`)) {
-      const bytes = JSON.stringify(part).length;
+      const bytes = sentSize(part);
       instance.outbox.push({ frame: part, bytes });
       instance.outboxBytes += bytes;
     }
@@ -246,8 +251,10 @@ export class PageBridge {
         const posted = await this.deps.post(next.frame, view).catch((): Posted => "gone");
         if (instance.view !== view) continue;
         if (posted === "ok") {
-          instance.outbox.shift();
-          instance.outboxBytes -= next.bytes;
+          if (instance.outbox[0] === next) {
+            instance.outbox.shift();
+            instance.outboxBytes -= next.bytes;
+          }
           backoff = BACKOFF_FIRST_MS;
         } else if (posted === "overloaded") {
           await this.wait(backoff);

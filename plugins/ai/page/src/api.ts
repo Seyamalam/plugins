@@ -1,7 +1,9 @@
-export type Ask = { id: string; chatId: string; kind: "read" | "act" | "close" | "group" | "open"; tool: string; tabTitle: string; origin: string | null; detail: string | null };
-export type Values = Record<string, string | boolean>;
+import type { Ask } from "../../runtime/src/asks.ts";
+import type { PluginValues as Values } from "../../runtime/src/host.ts";
+import type { TabSummary } from "../../runtime/src/tabs.ts";
+
+export type { Ask, TabSummary, Values };
 export type ChatEvents = { version: number; asks: Ask[]; stopped: boolean; values: Values };
-export type TabSummary = { id: string; title: string; url: string; favicon: string | null; window: string; active: boolean; inChatGroup: boolean; inChatSplit: boolean; tagged: boolean; openedByYou: boolean };
 export type ChatTabs = { chatTab: string | null; group: string | null; split: string | null; splitTabs: string[]; tabs: TabSummary[] };
 
 export type ApiRequest = (method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal) => Promise<unknown>;
@@ -59,7 +61,7 @@ export class ArdiaApi {
     return this.request<{ ok: true }>("POST", "/ardia/settings", { key, value });
   }
 
-  login(provider: "claude" | "codex") {
+  login(provider: "claude") {
     return this.request<{ started: true }>("POST", "/ardia/login", { provider });
   }
 

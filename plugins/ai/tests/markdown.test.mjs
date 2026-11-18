@@ -26,6 +26,8 @@ async function renderer() {
     entry,
     `import { renderToStaticMarkup } from "react-dom/server";
 import { Markdown } from ${JSON.stringify(join(here, "../page/src/markdown/Markdown.tsx"))};
+import { DiagramView } from ${JSON.stringify(join(here, "../page/src/markdown/Diagram.tsx"))};
+export const renderDiagram = (failed) => renderToStaticMarkup(<DiagramView source="graph TD; A-->B" failed={failed} />);
 export const render = (text, withLinks) => renderToStaticMarkup(<Markdown text={text} link={withLinks ? (href, label, key) => <a key={key} data-through-helper={href}>{label}</a> : undefined} />);`,
   );
   await build({
@@ -43,7 +45,7 @@ export const render = (text, withLinks) => renderToStaticMarkup(<Markdown text={
   });
   const mod = await import(pathToFileURL(join(dir, "out.mjs")).href);
   rmSync(dir, { recursive: true, force: true });
-  return mod.render;
+  return Object.assign(mod.render, { diagram: mod.renderDiagram });
 }
 
 test("answers render through T3's pipeline: tables, code blocks, diagrams, math, alerts, and links only through the helper", { skip: !haveTree && "needs a T3 Code tree (T3_TREE)" }, async () => {
@@ -86,4 +88,12 @@ test("answers render through T3's pipeline: tables, code blocks, diagrams, math,
   assert.doesNotMatch(html, /<script/);
   assert.doesNotMatch(html, /<img/);
   assert.match(html, /markdown-alert|Careful/);
+});
+
+test("a diagram that failed while its block was streaming keeps its drawing element, so the finished block can still draw", { skip: !haveTree && "needs a T3 Code tree (T3_TREE)" }, async () => {
+  const render = await renderer();
+  const failed = render.diagram(true);
+  assert.match(failed, /<div class="diagram" hidden="">/);
+  assert.match(failed, /class="code-block" data-language="mermaid"/);
+  assert.match(render.diagram(false), /<div class="diagram"><\/div>/);
 });

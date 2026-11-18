@@ -19,13 +19,31 @@ export const LOST_MS = 10_000;
 export const CALL_TIMEOUT_MS = 60_000;
 export const INSTANCE = /^[A-Za-z0-9_-]{8,64}$/;
 
-export function split(frame: Frame, limit: number, partId: () => string): Frame[] {
+const encoder = new TextEncoder();
+
+export function sentSize(frame: unknown): number {
   const text = JSON.stringify(frame);
-  if (text.length <= limit) return [frame];
-  const size = limit - 200;
-  const n = Math.ceil(text.length / size);
+  let slashes = 0;
+  for (let i = text.indexOf("/"); i >= 0; i = text.indexOf("/", i + 1)) slashes++;
+  return encoder.encode(text).length + slashes;
+}
+
+export function split(frame: Frame, limit: number, partId: () => string): Frame[] {
+  if (sentSize(frame) <= limit) return [frame];
+  const text = JSON.stringify(frame);
   const id = partId();
-  return Array.from({ length: n }, (_, i) => ({ t: "part" as const, p: frame.p, id, i, n, s: text.slice(i * size, (i + 1) * size) }));
+  const pieces: string[] = [];
+  for (let at = 0; at < text.length; ) {
+    let size = Math.min(text.length - at, limit);
+    for (;;) {
+      const measured = sentSize({ t: "part", p: frame.p, id, i: 99_999, n: 99_999, s: text.slice(at, at + size) });
+      if (measured <= limit || size === 1) break;
+      size = Math.max(1, Math.min(size - 1, Math.floor((size * limit * 0.98) / measured)));
+    }
+    pieces.push(text.slice(at, at + size));
+    at += size;
+  }
+  return pieces.map((s, i) => ({ t: "part" as const, p: frame.p, id, i, n: pieces.length, s }));
 }
 
 export class Assembler {

@@ -17,7 +17,7 @@ export type ApiDeps = {
   workspaceRoot: string;
   openPage: (path: string, how: { split: boolean; side?: string | undefined }) => Promise<{ tabId: string }>;
   setValue: (key: string, value: string | boolean) => Promise<void>;
-  startLogin: (provider: "claude" | "codex") => Promise<void>;
+  startLogin: (provider: "claude") => Promise<void>;
   count: (counter: Counter) => void;
   turns?: TurnControl | undefined;
   ledger: Pick<TurnLedger, "stop" | "allow">;
@@ -36,6 +36,25 @@ export function stopChat(deps: Pick<ApiDeps, "state" | "turns" | "ledger">, chat
 }
 
 const CHAT_ID = /^[A-Za-z0-9-]{8,64}$/;
+export const PROMPT_LIMIT = 600;
+export const OPEN_QUERY_LIMIT = 8_000;
+const OPEN_TARGET = /^(new|history|[A-Za-z0-9-]{8,64})(?:\?([A-Za-z0-9=&%._~+-]*))?$/;
+
+export function openTargetOf(value: unknown): string | { problem: string } {
+  if (typeof value !== "string" || value.length > 80 + OPEN_QUERY_LIMIT) return { problem: "Bad path." };
+  const match = OPEN_TARGET.exec(value);
+  if (!match || (match[2]?.length ?? 0) > OPEN_QUERY_LIMIT) return { problem: "Bad path." };
+  let query: URLSearchParams;
+  try {
+    query = new URLSearchParams(match[2] ?? "");
+  } catch {
+    return { problem: "Bad path." };
+  }
+  for (const [key, text] of query) {
+    if (key === "q" && [...text].length > PROMPT_LIMIT) return { problem: `The prompt is too long: ${PROMPT_LIMIT} characters at most.` };
+  }
+  return value;
+}
 const TAB_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 const POLL_MS = 25_000;
 const VALUE_KEYS = new Set(["mode", "side", "newTab", "model"]);
@@ -150,8 +169,9 @@ export async function handleApi(method: string, path: string, query: URLSearchPa
       return ok({ ok: true });
     }
     case "POST /ardia/open": {
-      const target = str(input.path, 700);
-      if (!target || !/^(new|history|[A-Za-z0-9-]{8,64})(\?[A-Za-z0-9=&%._~+-]{0,602})?$/.test(target)) return bad("Bad path.");
+      const opened = openTargetOf(input.path);
+      if (typeof opened !== "string") return bad(opened.problem);
+      const target = opened;
       const split = input.split === true;
       return ok(await deps.openPage(target, { split, side: typeof input.side === "string" ? input.side : undefined }));
     }
@@ -165,7 +185,7 @@ export async function handleApi(method: string, path: string, query: URLSearchPa
     }
     case "POST /ardia/login": {
       const provider = input.provider;
-      if (provider !== "claude" && provider !== "codex") return bad("provider must be claude or codex.");
+      if (provider !== "claude") return bad("The assistant runs on Claude: provider must be claude.");
       await deps.startLogin(provider);
       deps.count("signin_started");
       return ok({ started: true });

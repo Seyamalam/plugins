@@ -76,3 +76,27 @@ test("a New Tab prompt with a long query opens its chat instead of a blank tab",
   const over = await handleApi("POST", "/ardia/open", new URLSearchParams(), { path: `0b9e6c1e-2f4a-4c55-9d7e-1a2b3c4d5e6f?q=${"a".repeat(601)}` }, w.deps);
   assert.equal(over.status, 400);
 });
+
+test("the open route bounds the prompt by its decoded length, whatever it encodes to", async () => {
+  const w = deps();
+  const opened = [];
+  w.deps.openPage = async (path) => (opened.push(path), { tabId: "t" });
+  const open = (q) => handleApi("POST", "/ardia/open", new URLSearchParams(), { path: `0b9e6c1e-2f4a-4c55-9d7e-1a2b3c4d5e6f?q=${encodeURIComponent(q)}` }, w.deps);
+  assert.equal((await open(`${"a".repeat(599)}?`)).status, 200, "a ? encodes to %3F but is one character");
+  assert.equal((await open("日".repeat(600))).status, 200, "600 three-byte characters");
+  assert.equal((await open("😀".repeat(600))).status, 200, "600 astral characters");
+  const long = await open("a".repeat(601));
+  assert.equal(long.status, 400);
+  assert.match(long.body.error, /600 characters/);
+  assert.equal((await handleApi("POST", "/ardia/open", new URLSearchParams(), { path: "x y" }, w.deps)).status, 400);
+  assert.equal(opened.length, 3);
+});
+
+test("sign-in starts only for Claude; a Codex login is refused, since its tool calls carry no id Ardia can tie to a turn", async () => {
+  const w = deps();
+  const started = [];
+  w.deps.startLogin = async (provider) => void started.push(provider);
+  assert.equal((await handleApi("POST", "/ardia/login", new URLSearchParams(), { provider: "codex" }, w.deps)).status, 400);
+  assert.equal((await handleApi("POST", "/ardia/login", new URLSearchParams(), { provider: "claude" }, w.deps)).status, 200);
+  assert.deepEqual(started, ["claude"]);
+});

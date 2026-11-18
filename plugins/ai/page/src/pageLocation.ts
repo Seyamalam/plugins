@@ -15,6 +15,8 @@ export function pageLocation(href: string, staticPage: boolean): PageLocation {
   return { path: inner.pathname, search: inner.search };
 }
 
+export const isStaticPage = () => !!ardiaPage();
+
 export const currentPageLocation = () => pageLocation(location.href, !!ardiaPage());
 
 export function pageHref(href: string, path: string, staticPage: boolean): string {

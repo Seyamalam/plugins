@@ -8,7 +8,7 @@ export type ArdiaBridge = {
   removeEventListener?(type: "message", listener: (event: { data: unknown }) => void): void;
 };
 
-type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> | null };
+type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> | null; cleanup: (() => void) | null };
 type Stream = { method: string; payload: unknown; onItem(item: unknown): void; onEnd(error: unknown): void };
 
 export type LinkTimers = {
@@ -79,6 +79,7 @@ export class ChannelLink {
     this.bridge.removeEventListener?.("message", this.listener);
     for (const p of this.calls.values()) {
       if (p.timer) this.timers.clearTimeout(p.timer);
+      p.cleanup?.();
       p.reject(new Error("The assistant's page link closed."));
     }
     for (const s of this.streams.values()) s.onEnd(new Error("closed"));
@@ -95,22 +96,23 @@ export class ChannelLink {
   api(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
     if (signal?.aborted) return Promise.reject(new Error("aborted"));
     const id = this.nextId++;
-    const result = this.pending(id, CALL_TIMEOUT_MS, () =>
-      this.enqueue(body === undefined ? { t: "api", p: this.instance, id, method, path } : { t: "api", p: this.instance, id, method, path, body }),
+    const onAbort = () => {
+      const waiting = this.calls.get(id);
+      if (!waiting) return;
+      this.calls.delete(id);
+      if (waiting.timer) this.timers.clearTimeout(waiting.timer);
+      waiting.cleanup?.();
+      this.enqueue({ t: "cancel", p: this.instance, id });
+      waiting.reject(new Error("aborted"));
+    };
+    const cleanup = signal ? () => signal.removeEventListener("abort", onAbort) : null;
+    signal?.addEventListener("abort", onAbort, { once: true });
+    return this.pending(
+      id,
+      CALL_TIMEOUT_MS,
+      () => this.enqueue(body === undefined ? { t: "api", p: this.instance, id, method, path } : { t: "api", p: this.instance, id, method, path, body }),
+      cleanup,
     );
-    signal?.addEventListener(
-      "abort",
-      () => {
-        const waiting = this.calls.get(id);
-        if (!waiting) return;
-        this.calls.delete(id);
-        if (waiting.timer) this.timers.clearTimeout(waiting.timer);
-        this.enqueue({ t: "cancel", p: this.instance, id });
-        waiting.reject(new Error("aborted"));
-      },
-      { once: true },
-    );
-    return result;
   }
 
   stream(method: string, payload: unknown, onItem: (item: unknown) => void, onEnd: (error: unknown) => void): () => void {
@@ -127,13 +129,14 @@ export class ChannelLink {
     this.enqueue({ t: "open", p: this.instance, url });
   }
 
-  private pending(id: number, timeoutMs: number, send: () => void): Promise<unknown> {
+  private pending(id: number, timeoutMs: number, send: () => void, cleanup: (() => void) | null = null): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const timer = this.timers.setTimeout(() => {
         if (!this.calls.delete(id)) return;
+        cleanup?.();
         reject(new Error("The assistant didn't answer in time."));
       }, timeoutMs);
-      this.calls.set(id, { resolve, reject, timer });
+      this.calls.set(id, { resolve, reject, timer, cleanup });
       send();
     });
   }
@@ -188,6 +191,7 @@ export class ChannelLink {
       if (!pending) return;
       this.calls.delete(frame.id);
       if (pending.timer) this.timers.clearTimeout(pending.timer);
+      pending.cleanup?.();
       if (frame.ok) pending.resolve(frame.value);
       else pending.reject(new Error(frame.error ?? "The assistant refused that."));
     } else if (frame.t === "items") {

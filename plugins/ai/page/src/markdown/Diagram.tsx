@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type Ref } from "react";
 import { CodeBlock } from "./CodeBlock";
 
 type Pele = typeof import("pele/lazy");
@@ -21,18 +21,19 @@ export function Diagram({ source }: { source: string }) {
   useEffect(() => {
     let alive = true;
     let destroy: (() => void) | null = null;
+    setFailed(false);
     void (async () => {
       const pele = await loadCore();
-      if (!pele) return setFailed(true);
+      if (!pele) return void (alive && setFailed(true));
       let type: string | null = null;
       try {
         type = pele.detectType(source.trim()) as string | null;
       } catch {}
-      if (!type) return setFailed(true);
+      if (!type) return void (alive && setFailed(true));
       let load = typeLoads.get(type);
       if (!load) typeLoads.set(type, (load = pele.load(type as never).then(() => true, () => false)));
       const purify = await sanitizer();
-      if (!alive || !(await load) || !host.current) return alive && setFailed(!(await load));
+      if (!alive || !(await load) || !host.current) return void (alive && setFailed(!(await load)));
       const mounted = pele.mount(host.current, source.trim(), {
         links: false,
         images: false,
@@ -54,6 +55,14 @@ export function Diagram({ source }: { source: string }) {
       destroy?.();
     };
   }, [source]);
-  if (failed) return <CodeBlock code={source} language="mermaid" />;
-  return <div className="diagram" ref={host} />;
+  return <DiagramView source={source} failed={failed} host={host} />;
+}
+
+export function DiagramView({ source, failed, host }: { source: string; failed: boolean; host?: Ref<HTMLDivElement> }) {
+  return (
+    <>
+      <div className="diagram" ref={host} hidden={failed} />
+      {failed ? <CodeBlock code={source} language="mermaid" /> : null}
+    </>
+  );
 }

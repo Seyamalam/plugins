@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { SignInRows } from "./Notices";
 import { useSession } from "./session";
+import { shownMode } from "./welcomeMode.ts";
 
 const MODES = [
   { value: "browser", title: "Browser first", detail: "New Tab is search. The assistant opens beside your page when you ask for it." },
@@ -9,8 +10,8 @@ const MODES = [
 
 export function Welcome() {
   const session = useSession();
-  const current = typeof session.values.mode === "string" ? session.values.mode : "browser";
-  const [mode, setMode] = useState(current);
+  const [chosen, setMode] = useState<string | null>(null);
+  const mode = shownMode(session.values, chosen);
   useEffect(() => {
     document.title = "Set up AI";
   }, []);

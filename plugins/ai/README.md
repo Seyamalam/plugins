@@ -41,10 +41,11 @@ plugins/ai/
   comes back on a new view (it left its window and returned) the helper stops its old streams and tells it to ask
   again. `page.post` answers `overloaded` → the helper waits (100 ms, doubling to 2 s) and sends the same frame
   again, in order; past 4 MB waiting for one page, or a view that's gone, it drops what waited and the page
-  resubscribes. Frames over the host's limits go in parts. The helper speaks T3's RPC through one session of its own;
-  the page never signs in. The page's setup (info, providers, the shell subscription) is one state machine
-  (`page/src/sessionInit.ts`): a failure is kept until a setup succeeds, retried 1, 2, 4, 8 and 16 s later, then again
-  on the next project creation or when the link is healthy again; a health probe never clears it. A chat's id is its
+  resubscribes; so is a page the helper forgot after a minute of silence when it comes back. Frames over the host's
+  limits go in parts, each sized by the bytes Ardia will measure (UTF-8 of the JSON, with `/` counted twice as Ardia
+  escapes it), so no amount of escaping pushes a part over 64 KB (page to helper) or 256 KB (helper to page). An aborted
+  helper request sends Ardia `cancel`. The helper speaks T3's RPC through one session of its own; the page never signs
+  in. A chat's id is its
   T3 thread id, so `ardia://ai/<id>` is its address from the first moment.
   Answers render through T3's own markdown pipeline (`@t3tools/shared/markdownPipeline`: GFM tables, task lists and
   alerts, sanitized HTML) with react-markdown, under the page's bubbles (`page/src/markdown/`): code blocks are
@@ -53,6 +54,24 @@ plugins/ai/
   (`pele`, sanitized with DOMPurify, no links or images), and `$…$`/`$$…$$` math by KaTeX. Each loads as its own chunk
   (`page/chunks/`) the first time an answer needs it, so a plain answer loads none of them. Links and images become
   links that open through the helper; the offline page never fetches them.
+- **Startup** (`page/src/sessionState.ts` for the states and the screen, `page/src/sessionCore.ts` for the driver; React
+  only renders its snapshot). Setup is one attempt: open the transport once, read `/ardia/info` (values, workspace root),
+  read providers, subscribe to the shell. Each attempt is bounded at 15 s.
+
+  | State | Screen | Leaves on |
+  | --- | --- | --- |
+  | idle | connecting | start → starting |
+  | starting (no earlier error) | connecting | success → ready; failure → retrying |
+  | starting (after an error) | Reconnecting…, the last error, button disabled | success → ready; failure → retrying |
+  | retrying | Reconnecting…, the last error, Try again | the retry timer (1, 2, 4, 8, 16, then every 30 s), Try again, the link coming back, or a call that needs setup (`ensureProject`) → starting |
+  | ready | the chat | the shell subscription ending, or the link going quiet → retrying |
+  | stopped | nothing (the page closed) | never |
+
+  A loss while an attempt is running makes that attempt's success count as a failure, so the page never shows ready
+  without a subscription. A transport that finishes opening after the page closed is closed. Calls in flight read
+  live values from the core when they run (the workspace root `ensureProject` creates the project in comes from the
+  setup that just succeeded), never a value captured earlier. The table is tested as a table
+  (`tests/sessionState.test.mjs`) and the driver against a fake channel (`tests/sessionCore.test.mjs`).
 - **Ardia's routes** (`/ardia/*`, `runtime/src/routes.ts`) give the page what T3's RPC doesn't: permission asks
   (long-poll `GET /ardia/events`, `POST /ardia/asks/answer`), the chat's tabs (`GET /ardia/tabs`), send and stop
   (`POST /ardia/send` tags tabs and makes the group, `POST /ardia/stop`), opening a chat or history

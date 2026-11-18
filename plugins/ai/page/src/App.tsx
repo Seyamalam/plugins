@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { ChatView } from "./ChatView";
-import { currentPageLocation, useContextTab } from "./pageLocation";
+import { currentPageLocation, isStaticPage, replacePagePath, useContextTab } from "./pageLocation";
 import { History } from "./History";
-import { RuntimeStopped } from "./Notices";
+import { Centered, RuntimeStopped } from "./Notices";
+import type { ContextTab } from "./Composer";
 import { SessionProvider, useSession } from "./session";
 import { Welcome } from "./Welcome";
 import { watchGlass } from "./glass";
@@ -19,12 +20,17 @@ export function routeOf(pathname: string): Route {
   return { kind: "new" };
 }
 
-function NewChat() {
+function NewChat({ search, contextTab }: { search: string; contextTab: ContextTab | null }) {
   const session = useSession();
   const [chatId] = useState(() => crypto.randomUUID());
+  const [failed, setFailed] = useState<string | null>(null);
+  const inPlace = isStaticPage();
   useEffect(() => {
-    if (session.api) void session.api.open(`${chatId}${currentPageLocation().search}`).catch(() => undefined);
+    if (inPlace) return replacePagePath(`/${chatId}`);
+    if (session.api) void session.api.open(`${chatId}${search}`).catch((error: unknown) => setFailed(error instanceof Error ? error.message : String(error)));
   }, [session.api]);
+  if (inPlace) return <ChatView chatId={chatId} contextTab={contextTab} initialPrompt={new URLSearchParams(search).get("q")} />;
+  if (failed) return <Centered testId="open-failed" title="This chat couldn't open" detail={failed} />;
   return null;
 }
 
@@ -47,13 +53,13 @@ function useLinksThroughHelper() {
 function Screen() {
   const session = useSession();
   useLinksThroughHelper();
-  const here = currentPageLocation();
+  const [here] = useState(currentPageLocation);
   const route = routeOf(here.path);
   const contextTab = useContextTab();
-  if (session.error && session.connected === false) return <RuntimeStopped />;
+  if (session.screen.kind === "reconnecting") return <RuntimeStopped />;
   if (route.kind === "history") return <History />;
   if (route.kind === "welcome") return <Welcome />;
-  if (route.kind === "new") return <NewChat />;
+  if (route.kind === "new") return <NewChat search={here.search} contextTab={contextTab} />;
   const query = new URLSearchParams(here.search);
   return <ChatView chatId={route.chatId} contextTab={contextTab} initialPrompt={query.get("q")} />;
 }

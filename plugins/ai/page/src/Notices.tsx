@@ -12,10 +12,13 @@ export function Centered({ title, detail, children, testId }: { title: string; d
 }
 
 export function RuntimeStopped() {
+  const session = useSession();
+  const screen = session.screen;
+  const canRetry = screen.kind === "reconnecting" && screen.canRetry;
   return (
-    <Centered testId="runtime-stopped" title="The assistant stopped" detail="Its runtime isn't answering. Ardia restarts it on its own; reload once it's back.">
-      <button className="btn go" onClick={() => location.reload()}>
-        Reload ↩
+    <Centered testId="reconnecting" title="Reconnecting…" detail={screen.kind === "reconnecting" ? screen.error : "The assistant's runtime isn't answering."}>
+      <button className="btn go" onClick={() => session.retry()} disabled={!canRetry}>
+        {canRetry ? "Try again" : "Trying…"}
       </button>
     </Centered>
   );
