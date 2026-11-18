@@ -7,6 +7,7 @@ export type Transport = {
   connection: Connection;
   api: ArdiaApi;
   healthy(): Promise<boolean>;
+  onHealth: ((listener: (healthy: boolean) => void) => () => void) | null;
   openUrl: ((url: string) => void) | null;
 };
 
@@ -17,8 +18,9 @@ export async function openTransport(): Promise<Transport> {
     return {
       kind: "channel",
       connection: channelConnection(link),
-      api: new ArdiaApi((method, path, body) => link.api(method, path, body)),
-      healthy: async () => true,
+      api: new ArdiaApi((method, path, body, signal) => link.api(method, path, body, signal)),
+      healthy: async () => link.isHealthy,
+      onHealth: (listener) => link.onHealth(listener),
       openUrl: (url) => link.open(url),
     };
   }
@@ -28,6 +30,7 @@ export async function openTransport(): Promise<Transport> {
     connection: await connect(bearer),
     api: new ArdiaApi(fetchRequest(bearer)),
     healthy: () => fetch("/.well-known/t3/environment", { cache: "no-store" }).then((r) => r.ok, () => false),
+    onHealth: null,
     openUrl: null,
   };
 }

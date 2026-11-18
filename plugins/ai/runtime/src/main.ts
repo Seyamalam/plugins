@@ -8,10 +8,10 @@ import { ardiaHost, setArdiaHost, setPluginValues, type PluginValues } from "./h
 import { installWorkspace } from "./workspace.ts";
 import { pluginState } from "./state.ts";
 import { noteCleanExit, noteRunStart, Telemetry } from "./telemetry.ts";
+import { PageBridge } from "./pageBridge.ts";
 
 const STARTUP_DEADLINE_MS = 90_000;
 const TOKEN_WINDOW_MS = 12 * 60 * 60 * 1000;
-const REFRESH_MS = 6 * 60 * 60 * 1000;
 
 export function bootstrapToken(secret: string, nowMs: number): string {
   return Crypto.createHmac("sha256", secret).update(`t3-desktop-bootstrap:${Math.floor(nowMs / TOKEN_WINDOW_MS)}`).digest("hex");
@@ -131,18 +131,26 @@ export async function runArdia(args: ReadonlyArray<string>) {
   process.chdir(workspaceDir);
   process.argv = [process.argv[0]!, process.argv[1]!, "serve", "--bootstrap-fd", String(fd), "--base-dir", t3Home];
 
-  const serve = async () => {
-    const url = `http://127.0.0.1:${port}/#k=${bootstrapToken(secret, Date.now())}`;
-    if (fdText) await channel.request("page.serve", { url });
-    else process.stdout.write(`ardia page: ${url}\n`);
-  };
   void waitUntilServing(port).then(async (up) => {
     if (!up) {
       process.stderr.write("The runtime didn't start serving in time.\n");
       process.exit(1);
     }
-    await serve();
-    setInterval(() => void serve().catch(() => undefined), REFRESH_MS).unref();
+    if (!fdText) {
+      process.stdout.write(`ardia page: http://127.0.0.1:${port}/#k=${bootstrapToken(secret, Date.now())}\n`);
+      return;
+    }
+    const handle = ardiaHost()!;
+    const { answerPageApi } = await import("./routes.ts");
+    const { selfClient } = await import("./selfClient.ts");
+    const bridge = new PageBridge({
+      rpc: selfClient(port, () => bootstrapToken(secret, Date.now())),
+      api: (method, path, body, signal) => answerPageApi(handle, method, path, body, signal),
+      open: async (url) => void (await channel.request("open", { urls: [url] })),
+      post: (message, view) => channel.postToPage(message, view),
+    });
+    channel.onPageMessage((message, view) => bridge.receive(message, view));
+    channel.onClose(() => bridge.close());
   });
 
   const { runCli } = await import("../binCli.ts");

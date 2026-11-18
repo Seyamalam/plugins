@@ -8,6 +8,7 @@ import { pickModel, splitTags, type ModelOption, type TagRef } from "./models";
 import { NotSignedIn, RuntimeStopped } from "./Notices";
 import { useSession } from "./session";
 import { useChat } from "./useChat";
+import { currentPageLocation, replacePagePath } from "./pageLocation";
 
 const siteOf = (origin: string | null) => {
   if (!origin) return null;
@@ -225,7 +226,7 @@ export function ChatView({ chatId, contextTab, initialPrompt }: { chatId: string
   useEffect(() => {
     if (!initialPrompt || autoSent.current || !model || screen !== "empty") return;
     autoSent.current = true;
-    history.replaceState(history.state, "", location.pathname);
+    replacePagePath(currentPageLocation().path);
     void send(initialPrompt, contextTab ? [contextTab] : [], model);
   }, [initialPrompt, model, screen]);
 

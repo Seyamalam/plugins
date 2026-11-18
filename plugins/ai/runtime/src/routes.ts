@@ -151,6 +151,11 @@ const handler = Effect.gen(function* () {
   return json(reply.status, reply.body);
 });
 
+export function answerPageApi(handle: ArdiaHostHandle, method: "GET" | "POST", path: string, body: unknown, signal: AbortSignal) {
+  const url = new URL(path, `http://127.0.0.1:${handle.port}`);
+  return handleApi(method, url.pathname, url.searchParams, body, depsFor(handle), signal);
+}
+
 export const layer = Layer.mergeAll(HttpRouter.add("GET", "/ardia/*", handler), HttpRouter.add("POST", "/ardia/*", handler), layerTurns);
 
 export function requestAllowed(headers: Record<string, string | undefined>, port: number): boolean {

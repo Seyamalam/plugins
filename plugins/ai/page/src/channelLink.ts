@@ -1,13 +1,6 @@
-export type Frame =
-  | { t: "call"; id: number; method: string; payload: unknown }
-  | { t: "stream"; id: number; method: string; payload: unknown }
-  | { t: "cancel"; id: number }
-  | { t: "api"; id: number; method: "GET" | "POST"; path: string; body?: unknown }
-  | { t: "open"; url: string }
-  | { t: "result"; id: number; ok: boolean; value?: unknown; error?: string }
-  | { t: "items"; id: number; items: unknown[] }
-  | { t: "end"; id: number; error?: string }
-  | { t: "part"; id: string; i: number; n: number; s: string };
+import { Assembler, CALL_TIMEOUT_MS, LOST_MS, PAGE_TO_HELPER_LIMIT, PING_MS, SENDS_PER_SECOND, split, type Frame } from "../../runtime/src/frames.ts";
+
+export { Assembler, HELPER_TO_PAGE_LIMIT, PAGE_TO_HELPER_LIMIT, SENDS_PER_SECOND, split, type Frame } from "../../runtime/src/frames.ts";
 
 export type ArdiaBridge = {
   send(value: unknown): void;
@@ -15,37 +8,33 @@ export type ArdiaBridge = {
   removeEventListener?(type: "message", listener: (event: { data: unknown }) => void): void;
 };
 
-export const PAGE_TO_HELPER_LIMIT = 60_000;
-export const HELPER_TO_PAGE_LIMIT = 240_000;
-export const SENDS_PER_SECOND = 80;
+type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> | null };
+type Stream = { method: string; payload: unknown; onItem(item: unknown): void; onEnd(error: unknown): void };
 
-export function split(frame: Frame, limit: number, partId: () => string): Frame[] {
-  const text = JSON.stringify(frame);
-  if (text.length <= limit) return [frame];
-  const size = limit - 200;
-  const n = Math.ceil(text.length / size);
-  const id = partId();
-  return Array.from({ length: n }, (_, i) => ({ t: "part" as const, id, i, n, s: text.slice(i * size, (i + 1) * size) }));
+export type LinkTimers = {
+  now(): number;
+  setTimeout(run: () => void, ms: number): ReturnType<typeof setTimeout>;
+  clearTimeout(timer: ReturnType<typeof setTimeout>): void;
+  setInterval(run: () => void, ms: number): ReturnType<typeof setInterval>;
+  clearInterval(timer: ReturnType<typeof setInterval>): void;
+};
+
+const realTimers: LinkTimers = {
+  now: () => Date.now(),
+  setTimeout: (run, ms) => setTimeout(run, ms),
+  clearTimeout: (timer) => clearTimeout(timer),
+  setInterval: (run, ms) => setInterval(run, ms),
+  clearInterval: (timer) => clearInterval(timer),
+};
+
+export function newInstanceId(): string {
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
-
-export class Assembler {
-  private readonly open = new Map<string, string[]>();
-
-  take(frame: Frame): Frame | null {
-    if (frame.t !== "part") return frame;
-    const parts = this.open.get(frame.id) ?? new Array<string>(frame.n);
-    parts[frame.i] = frame.s;
-    this.open.set(frame.id, parts);
-    if (parts.filter((p) => p !== undefined).length < frame.n) return null;
-    this.open.delete(frame.id);
-    return JSON.parse(parts.join("")) as Frame;
-  }
-}
-
-type Pending = { resolve(value: unknown): void; reject(error: Error): void };
-type Stream = { onItem(item: unknown): void; onEnd(error: unknown): void };
 
 export class ChannelLink {
+  readonly instance: string;
   private nextId = 1;
   private nextPart = 1;
   private readonly calls = new Map<number, Pending>();
@@ -54,69 +43,128 @@ export class ChannelLink {
   private readonly queue: Frame[] = [];
   private sentAt: number[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private pinger: ReturnType<typeof setInterval> | null = null;
+  private lastPong: number;
+  private healthy = true;
+  private readonly healthListeners = new Set<(healthy: boolean) => void>();
   private readonly listener = (event: { data: unknown }) => this.receive(event.data);
   private readonly bridge: ArdiaBridge;
-  private readonly now: () => number;
+  private readonly timers: LinkTimers;
 
-  constructor(bridge: ArdiaBridge, now: () => number = () => Date.now()) {
+  constructor(bridge: ArdiaBridge, timers: LinkTimers = realTimers, instance = newInstanceId()) {
     this.bridge = bridge;
-    this.now = now;
+    this.timers = timers;
+    this.instance = instance;
+    this.lastPong = timers.now();
     bridge.addEventListener("message", this.listener);
+    this.pinger = timers.setInterval(() => this.ping(), PING_MS);
+    this.ping();
+  }
+
+  onHealth(listener: (healthy: boolean) => void): () => void {
+    this.healthListeners.add(listener);
+    return () => this.healthListeners.delete(listener);
+  }
+
+  get isHealthy() {
+    return this.healthy;
   }
 
   close() {
-    if (this.timer) clearTimeout(this.timer);
+    if (this.timer) this.timers.clearTimeout(this.timer);
+    if (this.pinger) this.timers.clearInterval(this.pinger);
     this.timer = null;
+    this.pinger = null;
     this.queue.length = 0;
     this.bridge.removeEventListener?.("message", this.listener);
-    for (const p of this.calls.values()) p.reject(new Error("The assistant's page link closed."));
+    for (const p of this.calls.values()) {
+      if (p.timer) this.timers.clearTimeout(p.timer);
+      p.reject(new Error("The assistant's page link closed."));
+    }
     for (const s of this.streams.values()) s.onEnd(new Error("closed"));
     this.calls.clear();
     this.streams.clear();
+    this.healthListeners.clear();
   }
 
   call(method: string, payload: unknown): Promise<unknown> {
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      this.calls.set(id, { resolve, reject });
-      this.enqueue({ t: "call", id, method, payload });
-    });
+    return this.pending(id, CALL_TIMEOUT_MS, () => this.enqueue({ t: "call", p: this.instance, id, method, payload }));
   }
 
-  api(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> {
+  api(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
+    if (signal?.aborted) return Promise.reject(new Error("aborted"));
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      this.calls.set(id, { resolve, reject });
-      this.enqueue(body === undefined ? { t: "api", id, method, path } : { t: "api", id, method, path, body });
-    });
+    const result = this.pending(id, CALL_TIMEOUT_MS, () =>
+      this.enqueue(body === undefined ? { t: "api", p: this.instance, id, method, path } : { t: "api", p: this.instance, id, method, path, body }),
+    );
+    signal?.addEventListener(
+      "abort",
+      () => {
+        const waiting = this.calls.get(id);
+        if (!waiting) return;
+        this.calls.delete(id);
+        if (waiting.timer) this.timers.clearTimeout(waiting.timer);
+        this.enqueue({ t: "cancel", p: this.instance, id });
+        waiting.reject(new Error("aborted"));
+      },
+      { once: true },
+    );
+    return result;
   }
 
   stream(method: string, payload: unknown, onItem: (item: unknown) => void, onEnd: (error: unknown) => void): () => void {
     const id = this.nextId++;
-    this.streams.set(id, { onItem, onEnd });
-    this.enqueue({ t: "stream", id, method, payload });
+    this.streams.set(id, { method, payload, onItem, onEnd });
+    this.enqueue({ t: "stream", p: this.instance, id, method, payload });
     return () => {
       if (!this.streams.delete(id)) return;
-      this.enqueue({ t: "cancel", id });
+      this.enqueue({ t: "cancel", p: this.instance, id });
     };
   }
 
   open(url: string) {
-    this.enqueue({ t: "open", url });
+    this.enqueue({ t: "open", p: this.instance, url });
+  }
+
+  private pending(id: number, timeoutMs: number, send: () => void): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const timer = this.timers.setTimeout(() => {
+        if (!this.calls.delete(id)) return;
+        reject(new Error("The assistant didn't answer in time."));
+      }, timeoutMs);
+      this.calls.set(id, { resolve, reject, timer });
+      send();
+    });
+  }
+
+  private ping() {
+    if (this.timers.now() - this.lastPong > LOST_MS) this.setHealthy(false);
+    this.enqueue({ t: "ping", p: this.instance });
+  }
+
+  private setHealthy(healthy: boolean) {
+    if (this.healthy === healthy) return;
+    this.healthy = healthy;
+    for (const listener of this.healthListeners) listener(healthy);
+  }
+
+  private resubscribe() {
+    for (const [id, s] of this.streams) this.enqueue({ t: "stream", p: this.instance, id, method: s.method, payload: s.payload });
   }
 
   private enqueue(frame: Frame) {
-    this.queue.push(...split(frame, PAGE_TO_HELPER_LIMIT, () => `p${this.nextPart++}`));
+    this.queue.push(...split(frame, PAGE_TO_HELPER_LIMIT, () => `${this.instance}-${this.nextPart++}`));
     this.drain();
   }
 
   private drain() {
     if (this.timer) return;
     while (this.queue.length) {
-      const now = this.now();
+      const now = this.timers.now();
       this.sentAt = this.sentAt.filter((t) => now - t < 1000);
       if (this.sentAt.length >= SENDS_PER_SECOND) {
-        this.timer = setTimeout(() => {
+        this.timer = this.timers.setTimeout(() => {
           this.timer = null;
           this.drain();
         }, 1000 - (now - this.sentAt[0]!));
@@ -128,13 +176,18 @@ export class ChannelLink {
   }
 
   private receive(data: unknown) {
-    if (!data || typeof data !== "object" || typeof (data as { t?: unknown }).t !== "string") return;
+    if (!data || typeof data !== "object" || typeof (data as { t?: unknown }).t !== "string" || (data as { p?: unknown }).p !== this.instance) return;
     const frame = this.assembler.take(data as Frame);
-    if (!frame) return;
-    if (frame.t === "result") {
+    if (!frame || frame.p !== this.instance) return;
+    if (frame.t === "pong") {
+      this.lastPong = this.timers.now();
+      this.setHealthy(true);
+      if (frame.moved) this.resubscribe();
+    } else if (frame.t === "result") {
       const pending = this.calls.get(frame.id);
       if (!pending) return;
       this.calls.delete(frame.id);
+      if (pending.timer) this.timers.clearTimeout(pending.timer);
       if (frame.ok) pending.resolve(frame.value);
       else pending.reject(new Error(frame.error ?? "The assistant refused that."));
     } else if (frame.t === "items") {

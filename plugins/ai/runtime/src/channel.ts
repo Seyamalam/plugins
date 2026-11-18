@@ -53,6 +53,7 @@ export class Channel {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private readonly eventHandlers = new Set<(event: ChannelEvent) => void>();
+  private readonly pageHandlers = new Set<(message: unknown, view: string) => void>();
   private callHandler: ((call: ToolCall) => Promise<unknown>) | null = null;
   private closed = false;
   private readonly closeHandlers = new Set<() => void>();
@@ -108,6 +109,20 @@ export class Channel {
     return () => this.eventHandlers.delete(handler);
   }
 
+  onPageMessage(handler: (message: unknown, view: string) => void): () => void {
+    this.pageHandlers.add(handler);
+    return () => this.pageHandlers.delete(handler);
+  }
+
+  async postToPage(message: unknown, view: string): Promise<"ok" | "overloaded" | "gone"> {
+    try {
+      await this.request("page.post", { message, view });
+      return "ok";
+    } catch (error) {
+      return error instanceof ChannelRequestError && error.code === "overloaded" ? "overloaded" : "gone";
+    }
+  }
+
   onClose(handler: () => void): () => void {
     if (this.closed) handler();
     else this.closeHandlers.add(handler);
@@ -151,6 +166,10 @@ export class Channel {
       const error = message.error as ChannelError | undefined;
       if (error && typeof error === "object") p.reject(new ChannelRequestError({ code: String(error.code ?? "failed"), message: String(error.message ?? "failed") }));
       else p.resolve(message.result);
+      return;
+    }
+    if ("pageMessage" in message && typeof message.view === "string") {
+      for (const handler of this.pageHandlers) handler(message.pageMessage, message.view);
       return;
     }
     if (typeof message.event === "string") {

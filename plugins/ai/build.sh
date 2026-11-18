@@ -1,7 +1,7 @@
 #!/bin/sh
 # Usage: plugins/ai/build.sh <out dir> [<t3code tree>]
 #   Builds the AI plugin folder into <out dir>/ai: plugin.json, the skill, the runtime binary (T3 Code's server at
-#   the pinned commit, patched by runtime/apply.sh) with its packages beside it, and the chat page.
+#   the pinned commit, patched by runtime/apply.sh) with its packages beside it, and the chat page (static files in page/).
 #   Without a tree it clones T3 Code into ~/.cache/ardia-ai-runtime/t3code. Needs Node 26.13.1 and pnpm on PATH.
 set -eu
 
@@ -41,5 +41,5 @@ cp -RL "$tree/apps/server/node_modules/@ff-labs/fff-node" "$dest/bin/node_module
 cp -RL "$pnpm_dir"/@ff-labs+fff-bin-darwin-arm64@*/node_modules/@ff-labs/fff-bin-darwin-arm64 "$dest/bin/node_modules/@ff-labs/"
 cp -RL "$pnpm_dir"/@yuuang+ffi-rs-darwin-arm64@*/node_modules/@yuuang/ffi-rs-darwin-arm64 "$dest/bin/node_modules/@yuuang/"
 [ -d "$here/node_modules/esbuild" ] || (cd "$here" && npm ci --no-audit --no-fund >/dev/null)
-node "$here/page/build.mjs" "$tree" "$dest/bin/client" >/dev/null
+node "$here/page/build.mjs" "$tree" "$dest/page" >/dev/null
 echo "built $dest ($(du -sh "$dest" | cut -f1))"

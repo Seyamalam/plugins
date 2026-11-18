@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ArdiaApi, Values } from "./api";
 import type { Connection } from "./connection";
-import { openTransport } from "./transport";
+import { openTransport, type Transport } from "./transport";
+import { initMachine, type InitMachine, type InitState } from "./sessionInit";
 import { modelOptions, type ModelOption, type ProviderInfo } from "./models";
 import { applyShell, type ShellThread } from "./shellState";
 
@@ -30,14 +31,12 @@ const SessionContext = createContext<Session | null>(null);
 export const useSession = () => useContext(SessionContext)!;
 
 const HEARTBEAT_MS = 10_000;
-const INFO_RETRIES = [1000, 2000, 4000, 8000, 16000];
-const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [connection, setConnection] = useState<Connection | null>(null);
   const [api, setApi] = useState<ArdiaApi | null>(null);
-  const [connected, setConnected] = useState<boolean | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [init, setInit] = useState<InitState>({ phase: "starting", error: null, attempts: 0 });
+  const [healthy, setHealthy] = useState(true);
   const [providers, setProviders] = useState<ProviderInfo[] | null>(null);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [threads, setThreads] = useState<ShellThread[]>([]);
@@ -45,8 +44,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [values, setValues] = useState<Values>({});
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
   const [openUrl, setOpenUrl] = useState<((url: string) => void) | null>(null);
-  const live = useRef<Connection | null>(null);
   const shellMap = useRef(new Map<string, ShellThread>());
+  const machine = useRef<InitMachine | null>(null);
 
   const loadProviders = useCallback(async (conn: Connection, refresh: boolean) => {
     if (refresh) await conn.call((c) => c["server.refreshProviders"]({} as never)).catch(() => undefined);
@@ -55,34 +54,31 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    let transport: Transport | null = null;
     let stopShell: (() => void) | null = null;
-    let cancelled = false;
-    let healthy: (() => Promise<boolean>) | null = null;
-    (async () => {
-      try {
-        const transport = await openTransport();
-        const conn = transport.connection;
-        if (cancelled) return conn.close();
-        live.current = conn;
-        healthy = transport.healthy;
-        const ardia = transport.api;
-        setConnection(conn);
-        setApi(ardia);
-        setOpenUrl(() => transport.openUrl);
-        setConnected(true);
-        void (async () => {
-          for (const delay of [0, ...INFO_RETRIES]) {
-            if (cancelled) return;
-            if (delay) await wait(delay);
-            const info = await ardia.info().catch(() => null);
-            if (info) {
-              setValues(info.values);
-              setWorkspaceRoot(info.workspaceRoot);
-              return;
-            }
-          }
-        })();
-        await loadProviders(conn, false);
+    let stopHealth: (() => void) | null = null;
+    let beat: ReturnType<typeof setInterval> | null = null;
+    const setUp = async () => {
+      if (!transport) {
+        transport = await openTransport();
+        const opened = transport;
+        setConnection(opened.connection);
+        setApi(opened.api);
+        setOpenUrl(() => opened.openUrl);
+        const onHealth = (ok: boolean) => {
+          setHealthy(ok);
+          if (ok) void machine.current?.retry();
+        };
+        if (opened.onHealth) stopHealth = opened.onHealth(onHealth);
+        else beat = setInterval(() => void opened.healthy().then(onHealth), HEARTBEAT_MS);
+      }
+      const conn = transport.connection;
+      const info = await transport.api.info();
+      setValues(info.values);
+      setWorkspaceRoot(info.workspaceRoot);
+      await loadProviders(conn, false);
+      if (!stopShell) {
+        shellMap.current = new Map();
         stopShell = conn.subscribe(
           (c) => c["orchestration.subscribeShell"]({} as never),
           (item: unknown) => {
@@ -92,23 +88,27 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             setThreads([...next.threads.values()].sort((a, b) => b.updatedAt - a.updatedAt));
             setShellLoaded(true);
           },
-          () => setConnected(false),
+          (error) => {
+            stopShell = null;
+            void machine.current?.invalidate(error ?? new Error("The assistant's runtime stopped answering."));
+          },
         );
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-        setConnected(false);
       }
-    })();
-    const beat = setInterval(() => {
-      if (healthy) void healthy().then((ok) => setConnected(ok));
-    }, HEARTBEAT_MS);
+    };
+    const m = initMachine(setUp, setInit);
+    machine.current = m;
+    void m.start();
     return () => {
-      cancelled = true;
-      clearInterval(beat);
+      m.stop();
+      if (beat) clearInterval(beat);
+      stopHealth?.();
       stopShell?.();
-      live.current?.close();
+      transport?.connection.close();
     };
   }, [loadProviders]);
+
+  const connected = init.phase === "ready" ? healthy : init.phase === "failed" ? false : null;
+  const error = init.phase === "failed" ? init.error : null;
 
   const value = useMemo<Session>(
     () => ({
@@ -126,6 +126,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       refreshProviders: () => (connection ? loadProviders(connection, true) : Promise.resolve()),
       ensureProject: async () => {
         if (projectId) return projectId;
+        if (machine.current && machine.current.state().phase !== "ready") await machine.current.retry();
+        const ready = machine.current?.state();
+        if (ready && ready.phase !== "ready") throw new Error(ready.error ?? "The assistant is still getting ready. Try again in a moment.");
         if (!connection || !workspaceRoot) throw new Error("The assistant is still getting ready. Try again in a moment.");
         const id = "ardia-workspace";
         await connection.call((c) => c["projects.mutate"]({ type: "project.create", commandId: crypto.randomUUID(), projectId: id, title: "Ardia", workspaceRoot, createWorkspaceRootIfMissing: true } as never));

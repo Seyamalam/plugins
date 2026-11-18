@@ -28,19 +28,37 @@ plugins/ai/
   free port on 127.0.0.1, and starts the server in T3's desktop mode with the secret as its rotating bootstrap secret
   (`desktopBootstrapSecret`, given through `--bootstrap-fd` from a file it opens and unlinks at once). Its data is
   `PluginData/ai/t3`; the agents' working folder is `PluginData/ai/workspace`, which holds the skill. When the
-  server answers it sends `page.serve {url: "http://127.0.0.1:<port>/#k=<token>"}` and again every 6 hours (the
-  token changes every 12). It exits when the channel closes, and T3's launcher watch stops it if Ardia dies.
-- **The page** is a static app the server serves. The host shows it in a WKWebView with its own data store and keeps
-  the fragment out of the address bar, history and session. The page exchanges the token at `/oauth/token` for a
-  30-day bearer (kept in the page's storage for that port), gets a WebSocket ticket and speaks T3's RPC
-  (`orchestration.launchThread`, `subscribeThread`, `dispatchCommand`, `subscribeShell`, `server.getConfig`). A chat's
-  id is its T3 thread id, so `ardia://ai/<id>` is its address from the first moment.
+  server answers it starts the page bridge. It exits when the channel closes, and T3's launcher watch stops it if Ardia
+  dies.
+- **The page** is static files in the plugin's `page/` (`page.file`), shown offline: it has no port, token or network.
+  It reads its route from `ardiaPath` and the tab it was handed from `window.ardia.context`, and talks to the helper
+  only through `window.ardia.send` and `page.post` (`page/src/channelLink.ts`, `runtime/src/pageBridge.ts`, frames in
+  `runtime/src/frames.ts`): `call` and `stream` reach the methods the chat uses of T3's RPC
+  (`orchestration.launchThread`, `subscribeThread`, `getThreadProjection`, `dispatchCommand`, `subscribeShell`,
+  `projects.mutate`, `server.getConfig`, `server.refreshProviders`; nothing else), `api` reaches Ardia's routes below
+  in-process, and `open` sends a link to the helper's `open` (so links open as tabs, with `commands`). Every frame
+  carries a random id per page load, and answers go to the view that asked; the page pings every 3 s, and when a page
+  comes back on a new view (it left its window and returned) the helper stops its old streams and tells it to ask
+  again. `page.post` answers `overloaded` → the helper waits (100 ms, doubling to 2 s) and sends the same frame
+  again, in order; past 4 MB waiting for one page, or a view that's gone, it drops what waited and the page
+  resubscribes. Frames over the host's limits go in parts. The helper speaks T3's RPC through one session of its own;
+  the page never signs in. The page's setup (info, providers, the shell subscription) is one state machine
+  (`page/src/sessionInit.ts`): a failure is kept until a setup succeeds, retried 1, 2, 4, 8 and 16 s later, then again
+  on the next project creation or when the link is healthy again; a health probe never clears it. A chat's id is its
+  T3 thread id, so `ardia://ai/<id>` is its address from the first moment.
 - **Ardia's routes** (`/ardia/*`, `runtime/src/routes.ts`) give the page what T3's RPC doesn't: permission asks
   (long-poll `GET /ardia/events`, `POST /ardia/asks/answer`), the chat's tabs (`GET /ardia/tabs`), send and stop
   (`POST /ardia/send` tags tabs and makes the group, `POST /ardia/stop`), opening a chat or history
   (`POST /ardia/open` → `page.open`), the first-run mode (`POST /ardia/settings` → `values.set`) and sign-in
-  (`POST /ardia/login` opens `claude auth login` or `codex login` in Terminal). Each request needs the page's bearer,
-  checked against the server's own `/api/auth/session`, `Host: 127.0.0.1:<port>` and no foreign `Origin`.
+  (`POST /ardia/login` opens `claude auth login` or `codex login` in Terminal). The page reaches them through the bridge;
+  over HTTP (the standalone dev server) each request needs a bearer checked against the server's own
+  `/api/auth/session`, `Host: 127.0.0.1:<port>` and no foreign `Origin`.
+- **Stop** belongs to a turn (`runtime/src/turnLedger.ts`, patch `0004-turn-ledger`): T3 tells the ledger when it
+  launches a provider turn on a thread and when that turn ends; every tool call is checked against the turn T3 has
+  running on the calling thread, captures that turn's token for its whole run, and is refused when the turn is
+  unknown, ended or stopped. Stop aborts every turn of the chat for good and dispatches `thread.stop` in-process; a new
+  message's turn gets a new token and never revives an old one. A tool waiting on a permission ask checks again when
+  the ask settles, and `browse` before and after each host round trip.
 - **Tools** (`runtime/src/browserToolkit.ts`) are an MCP toolkit in T3's MCP server, which T3 already gives every
   provider session with a bearer of its own, so a call always knows its chat (`McpInvocationContext`; a chat can't
   act as another). It replaces T3's own toolkits: an agent in Ardia gets `ardia_chat_context`, `ardia_list_tabs`,
@@ -80,7 +98,7 @@ and tabs tagged later join it (`POST /ardia/send`).
 Code at the pinned commit (or uses the tree given), runs `runtime/apply.sh` (patches once, recorded in
 `.ardia-patches`; copies `runtime/src` to `apps/server/src/ardia`), installs, builds the executable with
 `APP_VERSION` from `runtime/UPSTREAM`, and assembles `<out>/ai`: `plugin.json`, `skill/`, `NOTICE`, `bin/ardia-ai`,
-`bin/node_modules` (undici, ffi-rs, fff-node and their binaries) and `bin/client` (the page, `page/build.mjs`).
+`bin/node_modules` (undici, ffi-rs, fff-node and their binaries) and `page/` (the chat page, `page/build.mjs`).
 
 ## Updating T3 Code
 
