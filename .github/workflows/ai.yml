@@ -35,5 +35,6 @@ jobs:
           git -C "$RUNNER_TEMP/t3code" -c advice.detachedHead=false checkout -q "$pin"
           plugins/ai/runtime/apply.sh "$RUNNER_TEMP/t3code"
           cd "$RUNNER_TEMP/t3code" && pnpm install --frozen-lockfile --prefer-offline
+      - run: npm ci --prefix plugins/ai --no-audit --no-fund
       - run: node plugins/ai/page/build.mjs "$RUNNER_TEMP/t3code" "$RUNNER_TEMP/page"
       - run: test -s "$RUNNER_TEMP/page/app.js" && test -s "$RUNNER_TEMP/page/tokens.css"

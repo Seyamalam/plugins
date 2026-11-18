@@ -40,5 +40,6 @@ cp -RL "$tree/apps/server/node_modules/ffi-rs" "$dest/bin/node_modules/ffi-rs"
 cp -RL "$tree/apps/server/node_modules/@ff-labs/fff-node" "$dest/bin/node_modules/@ff-labs/fff-node"
 cp -RL "$pnpm_dir"/@ff-labs+fff-bin-darwin-arm64@*/node_modules/@ff-labs/fff-bin-darwin-arm64 "$dest/bin/node_modules/@ff-labs/"
 cp -RL "$pnpm_dir"/@yuuang+ffi-rs-darwin-arm64@*/node_modules/@yuuang/ffi-rs-darwin-arm64 "$dest/bin/node_modules/@yuuang/"
+[ -d "$here/node_modules/esbuild" ] || (cd "$here" && npm ci --no-audit --no-fund >/dev/null)
 node "$here/page/build.mjs" "$tree" "$dest/bin/client" >/dev/null
 echo "built $dest ($(du -sh "$dest" | cut -f1))"

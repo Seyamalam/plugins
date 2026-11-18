@@ -76,7 +76,7 @@ and tabs tagged later join it (`POST /ardia/send`).
 
 ## Building
 
-`build.sh <out dir> [<t3code tree>]` needs Node 26.13.1 (T3's engines) with pnpm on `PATH`. It clones T3
+`build.sh <out dir> [<t3code tree>]` needs Node 26.13.1 (T3's engines) with pnpm on `PATH`; it installs the page's one build tool (esbuild, `package.json` here) with `npm ci` first. It clones T3
 Code at the pinned commit (or uses the tree given), runs `runtime/apply.sh` (patches once, recorded in
 `.ardia-patches`; copies `runtime/src` to `apps/server/src/ardia`), installs, builds the executable with
 `APP_VERSION` from `runtime/UPSTREAM`, and assembles `<out>/ai`: `plugin.json`, `skill/`, `NOTICE`, `bin/ardia-ai`,
