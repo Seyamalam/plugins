@@ -3,7 +3,7 @@ import type { Ask, TabSummary } from "./api";
 import { entriesOf, isWorking, screenOf, type Entry, type ProviderAuth, type Step } from "./chatState";
 import { Composer, type ContextTab } from "./Composer";
 import { Favicon, indexTabs, TabChip, type TabIndex } from "./Favicon";
-import { Markdown } from "./Markdown";
+import { Markdown } from "./markdown/Markdown";
 import { pickModel, splitTags, type ModelOption, type TagRef } from "./models";
 import { NotSignedIn, RuntimeStopped } from "./Notices";
 import { useSession } from "./session";

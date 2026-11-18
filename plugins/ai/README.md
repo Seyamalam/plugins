@@ -46,6 +46,13 @@ plugins/ai/
   (`page/src/sessionInit.ts`): a failure is kept until a setup succeeds, retried 1, 2, 4, 8 and 16 s later, then again
   on the next project creation or when the link is healthy again; a health probe never clears it. A chat's id is its
   T3 thread id, so `ardia://ai/<id>` is its address from the first moment.
+  Answers render through T3's own markdown pipeline (`@t3tools/shared/markdownPipeline`: GFM tables, task lists and
+  alerts, sanitized HTML) with react-markdown, under the page's bubbles (`page/src/markdown/`): code blocks are
+  highlighted by T3's highlighter (`@pierre/diffs`, WASM lexers, `pierre-light`/`pierre-dark` following the window),
+  ```` ```mermaid ```` blocks (flowcharts, sequence diagrams, `xychart-beta` charts) are drawn by T3's diagram engine
+  (`pele`, sanitized with DOMPurify, no links or images), and `$…$`/`$$…$$` math by KaTeX. Each loads as its own chunk
+  (`page/chunks/`) the first time an answer needs it, so a plain answer loads none of them. Links and images become
+  links that open through the helper; the offline page never fetches them.
 - **Ardia's routes** (`/ardia/*`, `runtime/src/routes.ts`) give the page what T3's RPC doesn't: permission asks
   (long-poll `GET /ardia/events`, `POST /ardia/asks/answer`), the chat's tabs (`GET /ardia/tabs`), send and stop
   (`POST /ardia/send` tags tabs and makes the group, `POST /ardia/stop`), opening a chat or history

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { build } from "esbuild";
-import { copyFileSync, mkdirSync, rmSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,11 +29,18 @@ await build({
   legalComments: "none",
   nodePaths: [join(tree, "apps/web/node_modules")],
   define: { "process.env.NODE_ENV": JSON.stringify(dev ? "development" : "production") },
-  outfile: join(out, "app.js"),
+  splitting: true,
+  outdir: out,
+  entryNames: "app",
+  chunkNames: "chunks/[name]-[hash]",
   logLevel: "warning",
 });
 
 copyFileSync(join(here, "index.html"), join(out, "index.html"));
 copyFileSync(join(here, "src/styles.css"), join(out, "styles.css"));
 copyFileSync(join(here, "src/tokens.css"), join(out, "tokens.css"));
+const katex = dirname(createRequire(join(tree, "apps/web/package.json")).resolve("katex/package.json"));
+mkdirSync(join(out, "katex"), { recursive: true });
+copyFileSync(join(katex, "dist/katex.min.css"), join(out, "katex/katex.min.css"));
+cpSync(join(katex, "dist/fonts"), join(out, "katex/fonts"), { recursive: true, filter: (path) => !/\.(ttf|woff)$/.test(path) });
 console.log(`page built in ${out}`);
