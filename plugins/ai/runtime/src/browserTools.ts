@@ -92,6 +92,7 @@ async function permit(ctx: ToolContext, chatId: string, tool: string, kind: Tool
     throw new ToolFailure("refused", decision.reason);
   }
   const answer = await ctx.asks.ask({ chatId, kind: decision.reason as AskKind, tool, tabTitle: tab ? titleOf(tab) : (detail ?? ""), origin: decision.origin, detail }, ctx.signal);
+  turnGuard(ctx);
   if (answer === "deny" || answer === "timeout") {
     ctx.onUse?.({ tool, kind, outcome: answer === "timeout" ? "timed-out" : "denied" });
     throw new ToolFailure("denied", "The person said no. Don't ask again for this in this turn.");

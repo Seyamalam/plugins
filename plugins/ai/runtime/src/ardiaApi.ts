@@ -19,7 +19,7 @@ export type ApiDeps = {
   setValue: (key: string, value: string | boolean) => Promise<void>;
   startLogin: (provider: "claude" | "codex") => Promise<void>;
   count: (counter: Counter) => void;
-  turns?: TurnControl;
+  turns?: TurnControl | undefined;
   ledger: Pick<TurnLedger, "stop">;
 };
 

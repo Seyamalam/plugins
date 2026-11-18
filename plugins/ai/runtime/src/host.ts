@@ -11,7 +11,6 @@ export type ArdiaHostHandle = {
   port: number;
   values: PluginValues;
   appVersion: string;
-  selfToken: () => string;
 };
 
 let current: ArdiaHostHandle | null = null;

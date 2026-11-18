@@ -1,13 +1,15 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off extendsNativeError:off effectFnOpportunity:off globalFetch:off
 import * as ChildProcess from "node:child_process";
+import * as Crypto from "node:crypto";
 import * as Fs from "node:fs";
 import * as Path from "node:path";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
-import { bumpChat, handleApi, stopChat, type ApiDeps } from "./ardiaApi.ts";
-import { selfTurns } from "./selfClient.ts";
+import { CommandId, ThreadId } from "@t3tools/contracts";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import { bumpChat, handleApi, stopChat, type ApiDeps, type TurnControl } from "./ardiaApi.ts";
 import { ardiaHost, type ArdiaHostHandle } from "./host.ts";
 import { channelHost } from "./hostApi.ts";
 import { notifyChat, pluginState } from "./state.ts";
@@ -60,9 +62,22 @@ async function startLogin(handle: ArdiaHostHandle, provider: "claude" | "codex")
 }
 
 let wired = false;
-let turns: ApiDeps["turns"] | null = null;
+let turns: TurnControl | undefined;
 
-const turnsFor = (handle: ArdiaHostHandle) => (turns ??= selfTurns(handle.port, handle.selfToken));
+const layerTurns = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const run = Effect.runPromiseWith(yield* Effect.context<never>());
+    turns = {
+      stop: (chatId) =>
+        run(
+          orchestrator
+            .dispatch({ type: "thread.stop", commandId: CommandId.make(`ardia-stop:${Crypto.randomUUID()}`), threadId: ThreadId.make(chatId), reason: "Stopped in Ardia" })
+            .pipe(Effect.asVoid),
+        ),
+    };
+  }),
+);
 
 function depsFor(handle: ArdiaHostHandle): ApiDeps {
   const state = pluginState(handle.dataDir);
@@ -75,7 +90,7 @@ function depsFor(handle: ArdiaHostHandle): ApiDeps {
         const tab = String(event.data.tab ?? "");
         const chatId = state.banners.get(tab);
         if (chatId) {
-          stopChat({ state, turns: turnsFor(handle), ledger: turnLedger }, chatId);
+          stopChat({ state, turns, ledger: turnLedger }, chatId);
           notifyChat(state, chatId, "stopped");
           state.telemetry.count("banner_stops");
         }
@@ -85,7 +100,7 @@ function depsFor(handle: ArdiaHostHandle): ApiDeps {
   }
   return {
     host: channelHost(handle.channel),
-    turns: turnsFor(handle),
+    turns,
     ledger: turnLedger,
     state,
     values: () => handle.values,
@@ -136,7 +151,7 @@ const handler = Effect.gen(function* () {
   return json(reply.status, reply.body);
 });
 
-export const layer = Layer.mergeAll(HttpRouter.add("GET", "/ardia/*", handler), HttpRouter.add("POST", "/ardia/*", handler));
+export const layer = Layer.mergeAll(HttpRouter.add("GET", "/ardia/*", handler), HttpRouter.add("POST", "/ardia/*", handler), layerTurns);
 
 export function requestAllowed(headers: Record<string, string | undefined>, port: number): boolean {
   const own = `127.0.0.1:${port}`;

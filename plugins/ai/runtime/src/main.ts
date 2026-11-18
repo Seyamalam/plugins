@@ -124,7 +124,7 @@ export async function runArdia(args: ReadonlyArray<string>) {
     desktopAppUpdate: false,
   });
 
-  setArdiaHost({ channel, pluginDir, dataDir, workspaceDir, port, values: hello.values ?? {}, appVersion: hello.version ?? "", selfToken: () => bootstrapToken(secret, Date.now()) });
+  setArdiaHost({ channel, pluginDir, dataDir, workspaceDir, port, values: hello.values ?? {}, appVersion: hello.version ?? "" });
   process.env.PATH = providerPath(process.env.HOME ?? "");
   process.env.T3CODE_HOME = t3Home;
   process.env.T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD = "true";

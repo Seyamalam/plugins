@@ -11,12 +11,13 @@ const OTHER = "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
 function world() {
   const chat = { type: "tab", id: "chat", url: `ardia://ai/${CHAT}`, title: "chat", group: "g1", split: null, active: true };
   const doc = { type: "tab", id: "doc", url: "https://docs.example/x", title: "doc", group: "g1", split: null };
+  const bank = { type: "tab", id: "bank", url: "https://bank.example/home", title: "bank", group: null, split: null };
   const calls = [];
   let replyLater = null;
   const host = {
     calls,
     holdNextBrowse: () => new Promise((ready) => (replyLater = ready)),
-    workspace: async () => ({ windows: [{ id: "w1", spaces: [{ profile: "p", tabs: [{ type: "group", id: "g1", items: [chat, doc] }] }] }] }),
+    workspace: async () => ({ windows: [{ id: "w1", spaces: [{ profile: "p", tabs: [{ type: "group", id: "g1", items: [chat, doc] }, bank] }] }] }),
     browse: (tabId, argv) => {
       calls.push(["browse", tabId, ...argv]);
       const reply = { ok: true, text: `content of ${tabId}` };
@@ -140,3 +141,16 @@ test("A host reply that arrives after Stop is dropped and nothing follows it", a
   const actions = r.host.calls.filter((c) => c[0] === "browse").map((c) => c[2]);
   assert.deepEqual(actions, ["fill"], "the fill's late reply never leads to Enter");
 });
+
+test("Stop while a tool waits on its ask: the call reports stopped, and an Always given at that moment grants nothing", async () => {
+  const r = runtime();
+  r.ledger.launched(CHAT, "run-1", providerTurnKey("pt", 1));
+  const saved = [];
+  const reading = r.toolCall(CHAT, (ctx) => Tools.readTab({ ...ctx, asks: lateAsks(r, () => "always"), grants: { list: () => [], save: (g) => saved.push(g) } }, CHAT, "bank"));
+  await assert.rejects(reading, refusedAs("stopped"));
+  assert.deepEqual(saved, [], "no grant is saved after Stop");
+});
+
+function lateAsks(r, answer) {
+  return { ask: async () => (await r.api("/ardia/stop"), answer()), pending: () => [], answer: () => false, cancelChat: () => {}, onChange: () => () => {} };
+}
