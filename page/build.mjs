@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { build } from "esbuild";
 import { copyFileSync, mkdirSync, rmSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,11 +32,7 @@ await build({
   logLevel: "warning",
 });
 
-const tokensScript = join(out, ".tokens.mjs");
-await build({ entryPoints: [join(here, "scripts/tokens.ts")], bundle: true, platform: "node", format: "esm", outfile: tokensScript, logLevel: "warning", alias: { "react-native": join(here, "scripts/reactNativeStub.ts") } });
-execFileSync(process.execPath, [tokensScript, join(out, "tokens.css")]);
-rmSync(tokensScript);
-
 copyFileSync(join(here, "index.html"), join(out, "index.html"));
 copyFileSync(join(here, "src/styles.css"), join(out, "styles.css"));
+copyFileSync(join(here, "src/tokens.css"), join(out, "tokens.css"));
 console.log(`page built in ${out}`);
