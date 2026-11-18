@@ -92,7 +92,9 @@ plugins/<name>/
   tests/          unit tests, run with node --test plugins/<name>/tests/*.test.mjs
 ```
 
-CI: `Manifests` checks every `plugin.json` on every pull request; each full plugin has its own workflow that runs
+CI: `Manifests` checks every `plugin.json` on every pull request against `schema/plugin.schema.json`, a copy of the
+schema Ardia writes (ardia-browser/ardia `apps/cli/tests/fixtures/plugin.schema.json`), refreshed here by a pull
+request when Ardia's manifest grows; each full plugin has its own workflow that runs
 only when its folder changes (`.github/workflows/<name>.yml`). To work on one from an Ardia checkout, change it here
 in a pull request, then move Ardia's submodule pointer in a pull request there.
 

@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 
 const args = process.argv.slice(2);
 if (args.includes("--help") || args.length < 1) {
-  console.log(`Usage: check-manifests.mjs <plugin.schema.json path or URL> [plugin…]
+  console.log(`Usage: check-manifests.mjs <plugin.schema.json path or URL> [plugin…]   (CI passes schema/plugin.schema.json)
   Checks each plugins/<name>/plugin.json against Ardia's published plugin schema (the one Ardia writes beside
   config.schema.json and keeps in ardia-browser/ardia at apps/cli/tests/fixtures/plugin.schema.json).
   Needs ajv (npm i --no-save ajv@8). Settings-only plugins (no "manifest" key) are checked for a name only.`);

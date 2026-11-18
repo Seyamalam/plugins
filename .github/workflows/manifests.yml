@@ -5,9 +5,6 @@ on:
   push:
     branches: [main]
 
-env:
-  PLUGIN_SCHEMA_URL: https://raw.githubusercontent.com/ardia-browser/ardia/ai-plugin/apps/cli/tests/fixtures/plugin.schema.json
-
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -18,5 +15,5 @@ jobs:
         with:
           node-version: 24
       - run: npm install --no-save ajv@8
-      - run: node scripts/check-manifests.mjs "$PLUGIN_SCHEMA_URL"
+      - run: node scripts/check-manifests.mjs schema/plugin.schema.json
       - run: sh -n install.sh && sh install.sh --list
