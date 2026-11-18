@@ -18,6 +18,13 @@ function fakeTimers() {
       clearInterval: () => {},
     },
     delays: () => [...pending.values()].map((t) => t.ms).filter((ms) => ms < 15_000),
+    fireAttemptTimeout: () => {
+      const [id, t] = [...pending.entries()].find(([, t]) => t.ms === 15_000) ?? [];
+      if (id === undefined) return false;
+      pending.delete(id);
+      t.run();
+      return true;
+    },
     fireRetry: () => {
       const [id, t] = [...pending.entries()].find(([, t]) => t.ms < 15_000) ?? [];
       if (id === undefined) return false;
@@ -28,12 +35,14 @@ function fakeTimers() {
   };
 }
 
-function fakeChannel({ infos = [], roots = ["/workspace"], projects = [], late = false } = {}) {
+function fakeChannel({ infos = [], roots = ["/workspace"], projects = [], late = false, shells = [] } = {}) {
   const calls = [];
   let health = null;
   let shellEnd = null;
   let infoCount = 0;
   let closed = 0;
+  let cancelled = 0;
+  let subscribes = 0;
   const recorder = new Proxy({}, { get: (_, method) => (payload) => ({ method: String(method), payload }) });
   const transport = {
     kind: "channel",
@@ -46,11 +55,14 @@ function fakeChannel({ infos = [], roots = ["/workspace"], projects = [], late =
       },
       subscribe: (make, onItem, onEnd) => {
         calls.push([make(recorder).method]);
+        const plan = shells[subscribes++] ?? "snapshot";
         shellEnd = onEnd;
         const snapshot = () => onItem({ kind: "snapshot", snapshot: { projects, threads: [] } });
-        if (late) setTimeout(snapshot, 5);
+        if (plan === "end-before-return") onEnd(new Error("The shell ended at once."));
+        else if (plan === "silent") {}
+        else if (late) setTimeout(snapshot, 5);
         else snapshot();
-        return () => {};
+        return () => void cancelled++;
       },
       close: () => void closed++,
     },
@@ -65,7 +77,7 @@ function fakeChannel({ infos = [], roots = ["/workspace"], projects = [], late =
     onHealth: (listener) => ((health = listener), () => (health = null)),
     openUrl: () => {},
   };
-  return { transport, calls, health: (h) => health?.(h), endShell: (e) => shellEnd?.(e), closed: () => closed, infoCount: () => infoCount };
+  return { transport, calls, health: (h) => health?.(h), endShell: (e) => shellEnd?.(e), closed: () => closed, infoCount: () => infoCount, cancelled: () => cancelled, subscribes: () => subscribes };
 }
 
 const screenOf = (core) => core.getSnapshot().screen;
@@ -165,5 +177,40 @@ test("a chat sent at once after startup uses the project the first shell snapsho
   const project = await core.ensureProject();
   assert.equal(project, "ardia-workspace");
   assert.equal(ch.calls.filter(([m]) => m === "projects.mutate").length, 0);
+  core.stop();
+});
+
+test("a shell that stays open with no snapshot past the timeout: not ready, no project created, and the next attempt subscribes afresh", async () => {
+  const t = fakeTimers();
+  const ch = fakeChannel({ shells: ["silent", "snapshot"], projects: [{ id: "ardia-workspace" }] });
+  const core = new SessionCore({ openTransport: async () => ch.transport, timers: t.timers });
+  core.start();
+  await settle();
+  assert.deepEqual(screenOf(core), { kind: "connecting" });
+  assert.ok(t.fireAttemptTimeout());
+  await settle();
+  assert.deepEqual(screenOf(core), { kind: "reconnecting", error: "The assistant didn't answer in time.", canRetry: true });
+  assert.equal(ch.cancelled(), 1, "the timed-out attempt's subscription is cancelled");
+  assert.ok(t.fireRetry());
+  await settle();
+  assert.equal(ch.subscribes(), 2, "the retry subscribes again instead of trusting the old one");
+  assert.deepEqual(screenOf(core), { kind: "ready" });
+  assert.equal(await core.ensureProject(), "ardia-workspace");
+  assert.equal(ch.calls.filter(([m]) => m === "projects.mutate").length, 0, "the existing project isn't created again");
+  ch.endShell(new Error("late end from the old subscription"));
+  core.stop();
+});
+
+test("a subscription that ends before subscribe returns fails that attempt, and the retry makes a new subscription", async () => {
+  const t = fakeTimers();
+  const ch = fakeChannel({ shells: ["end-before-return", "snapshot"] });
+  const core = new SessionCore({ openTransport: async () => ch.transport, timers: t.timers });
+  core.start();
+  await settle();
+  assert.deepEqual(screenOf(core), { kind: "reconnecting", error: "The shell ended at once.", canRetry: true });
+  assert.ok(t.fireRetry());
+  await settle();
+  assert.equal(ch.subscribes(), 2);
+  assert.deepEqual(screenOf(core), { kind: "ready" });
   core.stop();
 });

@@ -4,7 +4,7 @@ import { Favicon, type TabIndex } from "./Favicon";
 import { Icon } from "./icons";
 import type { ModelOption, TagRef } from "./models";
 
-export type ContextTab = { id: string; title: string; url?: string | undefined };
+export type ContextTab = TagRef;
 
 type Props = {
   working: boolean;

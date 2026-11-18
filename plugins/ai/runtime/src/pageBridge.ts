@@ -1,4 +1,5 @@
 // @effect-diagnostics globalTimers:off globalDate:off
+import type { SelfClient } from "./selfClient.ts";
 import { Assembler, HELPER_TO_PAGE_LIMIT, INSTANCE, sentSize, split, type Frame } from "./frames.ts";
 
 export const PAGE_CALLS = new Set([
@@ -20,13 +21,9 @@ const MAX_STREAMS = 32;
 
 export type Posted = "ok" | "overloaded" | "gone";
 
-export type BridgeRpc = {
-  call(method: string, payload: unknown): Promise<unknown>;
-  stream(method: string, payload: unknown, onItem: (item: unknown) => void, onEnd: (error: unknown) => void): () => void;
-};
 
 export type BridgeDeps = {
-  rpc: BridgeRpc;
+  rpc: SelfClient;
   api: (method: "GET" | "POST", path: string, body: unknown, signal: AbortSignal) => Promise<{ status: number; body: unknown }>;
   open: (url: string) => Promise<void>;
   post: (message: unknown, view: string) => Promise<Posted>;

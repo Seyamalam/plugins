@@ -50,7 +50,7 @@ export class SessionCore {
   private healthy = true;
   private transport: Transport | null = null;
   private opening: Promise<Transport> | null = null;
-  private stopShell: (() => void) | null = null;
+  private current: Attempt | null = null;
   private stopHealth: (() => void) | null = null;
   private beat: unknown = null;
   private retryTimer: unknown = null;
@@ -135,58 +135,49 @@ export class SessionCore {
     if (before.phase === "retrying" && after.phase !== "retrying") this.clearRetry();
     if (after.phase === "starting" && before.phase !== "starting") void this.attempt(after.epoch);
     if (after.phase === "retrying" && before.phase !== "retrying") this.retryTimer = this.timers.setTimeout(() => this.dispatch({ type: "attempt" }), retryDelay(after.failures));
+    if (after.phase === "retrying" && before.phase !== "retrying") this.disposeCurrent();
+    if (after.phase === "starting" && event.type === "lost") this.disposeCurrent();
     if (after.phase === "stopped") this.teardown();
     if (after.phase !== "starting" && after.phase !== "idle") for (const wake of [...this.waiters]) (this.waiters.delete(wake), wake());
     this.changed();
   }
 
   private async attempt(epoch: number) {
+    this.current?.dispose();
+    const attempt = new Attempt(epoch);
+    this.current = attempt;
     let timer: unknown = null;
     try {
-      await Promise.race([
-        this.setUp(),
+      const result = await Promise.race([
+        this.connect().then((transport) =>
+          attempt.run(transport, {
+            shell: (item) => this.current === attempt && this.applyShellItem(item),
+            lost: (error) => this.current === attempt && this.dispatch({ type: "lost", error }),
+          }),
+        ),
         new Promise<never>((_, reject) => (timer = this.timers.setTimeout(() => reject(new Error("The assistant didn't answer in time.")), this.attemptMs))),
       ]);
+      if (this.current !== attempt) throw new Error("A newer attempt replaced this one.");
+      this.values = result.values;
+      this.workspaceRoot = result.workspaceRoot;
+      this.providers = result.providers;
       this.dispatch({ type: "succeeded", epoch });
     } catch (error) {
+      attempt.dispose();
+      if (this.current === attempt) this.current = null;
       this.dispatch({ type: "failed", epoch, error: messageOf(error) });
     } finally {
       if (timer !== null) this.timers.clearTimeout(timer);
     }
   }
 
-  private async setUp() {
-    const transport = await this.connect();
-    const info = await transport.api.info();
-    if (this.phase() === "stopped") return;
-    this.values = info.values;
-    this.workspaceRoot = info.workspaceRoot;
-    await this.loadProviders(transport);
-    if (this.phase() === "stopped" || this.stopShell) return;
-    this.shellMap = new Map();
-    let firstItem: (() => void) | null = null;
-    let firstFailure: ((error: Error) => void) | null = null;
-    const loaded = new Promise<void>((resolve, reject) => ((firstItem = resolve), (firstFailure = reject)));
-    let stop: (() => void) | null = null;
-    stop = transport.connection.subscribe(
-      (c) => c["orchestration.subscribeShell"]({} as never),
-      (item: unknown) => {
-        const next = applyShell(this.shellMap, item as Record<string, unknown>);
-        this.shellMap = next.threads;
-        if (next.projectId) this.projectId ??= next.projectId;
-        this.threads = [...next.threads.values()].sort((a, b) => b.updatedAt - a.updatedAt);
-        this.shellLoaded = true;
-        firstItem?.();
-        this.changed();
-      },
-      (error) => {
-        firstFailure?.(new Error(error ? messageOf(error) : "The assistant's runtime stopped answering."));
-        if (this.stopShell === stop) this.stopShell = null;
-        this.dispatch({ type: "lost", error: error ? messageOf(error) : "The assistant's runtime stopped answering." });
-      },
-    );
-    this.stopShell = stop;
-    await loaded;
+  private applyShellItem(item: unknown) {
+    const next = applyShell(this.shellMap, item as Record<string, unknown>);
+    this.shellMap = next.threads;
+    if (next.projectId) this.projectId ??= next.projectId;
+    this.threads = [...next.threads.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+    this.shellLoaded = true;
+    this.changed();
   }
 
   private async connect(): Promise<Transport> {
@@ -217,6 +208,11 @@ export class SessionCore {
     this.changed();
   }
 
+  private disposeCurrent() {
+    this.current?.dispose();
+    this.current = null;
+  }
+
   private clearRetry() {
     if (this.retryTimer !== null) this.timers.clearTimeout(this.retryTimer);
     this.retryTimer = null;
@@ -227,8 +223,7 @@ export class SessionCore {
     if (this.beat !== null) this.timers.clearInterval(this.beat);
     this.beat = null;
     this.stopHealth?.();
-    this.stopShell?.();
-    this.stopShell = null;
+    this.disposeCurrent();
     this.transport?.connection.close();
     this.transport = null;
   }
@@ -253,5 +248,63 @@ export class SessionCore {
   private changed() {
     this.snapshot = this.makeSnapshot();
     for (const listener of [...this.listeners]) listener();
+  }
+}
+
+type AttemptResult = { values: Values; workspaceRoot: string; providers: ProviderInfo[] };
+
+class Attempt {
+  readonly epoch: number;
+  private cancelShell: (() => void) | null = null;
+  private disposed = false;
+
+  constructor(epoch: number) {
+    this.epoch = epoch;
+  }
+
+  async run(transport: Transport, on: { shell(item: unknown): void; lost(error: string): void }): Promise<AttemptResult> {
+    const info = await transport.api.info();
+    this.check();
+    const config = (await transport.connection.call((c) => c["server.getConfig"]({} as never))) as unknown as { providers: ProviderInfo[] };
+    this.check();
+    await new Promise<void>((resolve, reject) => {
+      let loaded = false;
+      let ended = false;
+      const cancel = transport.connection.subscribe(
+        (c) => c["orchestration.subscribeShell"]({} as never),
+        (item: unknown) => {
+          if (this.disposed || ended) return;
+          on.shell(item);
+          if (!loaded) {
+            loaded = true;
+            resolve();
+          }
+        },
+        (error) => {
+          if (this.disposed || ended) return;
+          ended = true;
+          this.cancelShell = null;
+          const message = error ? messageOf(error) : "The assistant's runtime stopped answering.";
+          if (loaded) on.lost(message);
+          else reject(new Error(message));
+        },
+      );
+      if (this.disposed) cancel();
+      else if (!ended) this.cancelShell = cancel;
+    });
+    this.check();
+    return { values: info.values, workspaceRoot: info.workspaceRoot, providers: [...config.providers] };
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    const cancel = this.cancelShell;
+    this.cancelShell = null;
+    cancel?.();
+  }
+
+  private check() {
+    if (this.disposed) throw new Error("A newer attempt replaced this one.");
   }
 }

@@ -1,32 +1,16 @@
 import { useEffect, useState } from "react";
 import type { ContextTab } from "./Composer";
+import { pageHref, pageLocation } from "./pagePath.ts";
+
+export { pageHref, pageLocation, type PageLocation } from "./pagePath.ts";
 
 type ArdiaPage = EventTarget & { context?: unknown };
 
 const ardiaPage = (): ArdiaPage | null => ((globalThis as { ardia?: ArdiaPage }).ardia ?? null);
 
-export type PageLocation = { path: string; search: string };
-
-export function pageLocation(href: string, staticPage: boolean): PageLocation {
-  const url = new URL(href);
-  if (!staticPage) return { path: url.pathname, search: url.search };
-  const ardiaPath = url.searchParams.get("ardiaPath") ?? "/";
-  const inner = new URL(ardiaPath.startsWith("/") ? ardiaPath : `/${ardiaPath}`, "http://page.invalid");
-  return { path: inner.pathname, search: inner.search };
-}
-
 export const isStaticPage = () => !!ardiaPage();
 
 export const currentPageLocation = () => pageLocation(location.href, !!ardiaPage());
-
-export function pageHref(href: string, path: string, staticPage: boolean): string {
-  if (!staticPage) return path;
-  const url = new URL(href);
-  url.search = "";
-  url.hash = "";
-  if (path !== "/") url.searchParams.set("ardiaPath", path);
-  return `${url.pathname}${url.search}`;
-}
 
 export function replacePagePath(path: string) {
   history.replaceState(history.state, "", pageHref(location.href, path, !!ardiaPage()));

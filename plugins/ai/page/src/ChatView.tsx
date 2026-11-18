@@ -8,7 +8,7 @@ import { pickModel, splitTags, type ModelOption, type TagRef } from "./models";
 import { NotSignedIn, RuntimeStopped } from "./Notices";
 import { useSession } from "./session";
 import { useChat } from "./useChat";
-import { currentPageLocation, replacePagePath } from "./pageLocation";
+import { openingPrompts } from "./openingPrompts.ts";
 
 const siteOf = (origin: string | null) => {
   if (!origin) return null;
@@ -195,7 +195,7 @@ function EmptyState({ suggestions, tabs, onPick }: { suggestions: Suggestion[]; 
   );
 }
 
-export function ChatView({ chatId, contextTab, initialPrompt }: { chatId: string; contextTab: ContextTab | null; initialPrompt: string | null }) {
+export function ChatView({ chatId, contextTab }: { chatId: string; contextTab: ContextTab | null }) {
   const session = useSession();
   const { chat, exists, asks, send, stop, answer, sendError } = useChat(chatId);
   const [modelSlug, setModelSlug] = useState<string | null>(() => localStorage.getItem("ardia.ai.model"));
@@ -207,7 +207,6 @@ export function ChatView({ chatId, contextTab, initialPrompt }: { chatId: string
   const { list: tabList, index: tabs, load: loadTabs } = useTabIndex(chatId, `${working}-${entries.length}`);
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
-  const autoSent = useRef(false);
 
   const last = entries[entries.length - 1];
   const streamingText = last?.kind === "assistant" && last.streaming && !!last.text.trim();
@@ -224,11 +223,10 @@ export function ChatView({ chatId, contextTab, initialPrompt }: { chatId: string
     else if (chat.title) document.title = chat.title;
   }, [chat.title, exists]);
   useEffect(() => {
-    if (!initialPrompt || autoSent.current || !model || screen !== "empty") return;
-    autoSent.current = true;
-    replacePagePath(currentPageLocation().path);
-    void send(initialPrompt, contextTab ? [contextTab] : [], model);
-  }, [initialPrompt, model, screen]);
+    if (!openingPrompts.peek(chatId) || !model || screen !== "empty") return;
+    const prompt = openingPrompts.take(chatId);
+    if (prompt) void send(prompt, contextTab ? [contextTab] : [], model);
+  }, [chatId, model, screen]);
 
   const chooseModel = (m: ModelOption) => {
     setModelSlug(m.slug);

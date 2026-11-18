@@ -67,8 +67,14 @@ plugins/ai/
   | ready | the chat | the shell subscription ending, or the link going quiet → retrying |
   | stopped | nothing (the page closed) | never |
 
-  A loss while an attempt is running makes that attempt's success count as a failure, so the page never shows ready
-  without a subscription. A transport that finishes opening after the page closed is closed. Calls in flight read
+  Each attempt is an object that owns its own shell subscription and its cancel; the session holds only the current
+  attempt, and replacing it, timing it out, a loss, a retry or closing the page disposes the old one (cancelling its
+  subscription), after which nothing it does reaches the session. An attempt is ready only on its own first shell
+  snapshot, and a subscription that ends before it is set up fails that attempt, so the retry subscribes afresh. A
+  transport that finishes opening after the page closed is closed. The opening prompt (`?q=`) is handed over once:
+  at startup the page picks the chat's id, keeps the prompt in a page-wide store keyed by that id and drops it from
+  the address, and the chat takes it from the store when it can send, so a reconnect remounts the same chat with
+  nothing to send twice. Calls in flight read
   live values from the core when they run (the workspace root `ensureProject` creates the project in comes from the
   setup that just succeeded), never a value captured earlier. The table is tested as a table
   (`tests/sessionState.test.mjs`) and the driver against a fake channel (`tests/sessionCore.test.mjs`).
