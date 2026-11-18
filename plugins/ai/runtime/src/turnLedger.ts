@@ -5,9 +5,9 @@ export type TurnRefusal = "unknown" | "ended" | "stopped";
 
 export type TurnLookup = { ok: true; turn: TurnToken } | { ok: false; refusal: TurnRefusal };
 
-export type ToolCallInfo = { readonly toolUseId: string | null; readonly tool: string; readonly input: unknown };
+export type ToolCallInfo = { readonly toolUseId: string | null; readonly tool: string };
 
-type ToolItem = { readonly nativeId: string; name: string; input: string | null; claimed: boolean };
+type ToolItem = { readonly nativeId: string; name: string; claimed: boolean };
 
 type Turn = {
   readonly threadId: string;
@@ -19,34 +19,10 @@ type Turn = {
 };
 
 export const ATTRIBUTION_WAIT_MS = 5_000;
-export const HELD_THREADS_LIMIT = 5_000;
+export const ALLOWED_MESSAGES_LIMIT = 10_000;
 const ITEMS_PER_TURN_LIMIT = 512;
 
 export const providerTurnKey = (providerThreadId: string, runOrdinal: number) => `${providerThreadId}#${runOrdinal}`;
-
-export function canonicalInput(value: unknown): string | null {
-  const parsed = typeof value === "string" ? safeParse(value) : value;
-  if (parsed === undefined) return null;
-  return JSON.stringify(sortKeys(parsed));
-}
-
-function safeParse(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-}
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.keys(value as Record<string, unknown>)
-      .sort()
-      .map((key) => [key, sortKeys((value as Record<string, unknown>)[key])]),
-  );
-}
 
 function toolOf(name: string): string {
   const cut = name.lastIndexOf("__");
@@ -56,11 +32,16 @@ function toolOf(name: string): string {
 export class TurnLedger {
   private readonly turns = new Map<string, Turn>();
   private readonly onProvider = new Map<string, string>();
-  private readonly held = new Map<string, { allowed: string | null }>();
+  private readonly allowed = new Map<string, Set<string>>();
+  private allowedCount = 0;
   private readonly waiters = new Set<() => void>();
 
+  get turnCount() {
+    return this.turns.size;
+  }
+
   get size() {
-    return this.turns.size + this.held.size;
+    return this.turns.size + this.allowedCount;
   }
 
   launched(input: { threadId: string; runId: string; providerTurn: string; session: string; messageId?: string | undefined }): void {
@@ -69,9 +50,7 @@ export class TurnLedger {
       this.onProvider.set(input.providerTurn, input.runId);
       return;
     }
-    const hold = this.held.get(input.threadId);
-    const allowed = !hold || (input.messageId !== undefined && hold.allowed === input.messageId);
-    if (hold && allowed) this.held.delete(input.threadId);
+    const allowed = input.messageId !== undefined && !!this.allowed.get(input.threadId)?.has(input.messageId);
     const turn: Turn = { threadId: input.threadId, runId: input.runId, session: input.session, controller: new AbortController(), stopped: !allowed, items: new Map() };
     if (!allowed) turn.controller.abort(new Error("stopped"));
     this.turns.set(input.runId, turn);
@@ -92,9 +71,7 @@ export class TurnLedger {
   }
 
   stop(threadId: string): number {
-    this.held.delete(threadId);
-    this.held.set(threadId, { allowed: null });
-    while (this.held.size > HELD_THREADS_LIMIT) this.held.delete(this.held.keys().next().value!);
+    this.forgetAllowed(threadId);
     let stopped = 0;
     for (const turn of this.turns.values()) {
       if (turn.threadId !== threadId || turn.stopped) continue;
@@ -107,10 +84,27 @@ export class TurnLedger {
   }
 
   allow(threadId: string, messageId: string): void {
-    if (this.held.has(threadId)) this.held.set(threadId, { allowed: messageId });
+    const messages = this.allowed.get(threadId) ?? new Set<string>();
+    if (messages.has(messageId)) return;
+    messages.add(messageId);
+    this.allowed.delete(threadId);
+    this.allowed.set(threadId, messages);
+    this.allowedCount++;
+    while (this.allowedCount > ALLOWED_MESSAGES_LIMIT) {
+      const [oldest, set] = this.allowed.entries().next().value!;
+      const first = set.values().next().value!;
+      set.delete(first);
+      this.allowedCount--;
+      if (set.size === 0) this.allowed.delete(oldest);
+    }
   }
 
-  noteToolItem(item: { runId: string | null; nativeId: string | null; name: string | null; input: unknown }): void {
+  private forgetAllowed(threadId: string): void {
+    this.allowedCount -= this.allowed.get(threadId)?.size ?? 0;
+    this.allowed.delete(threadId);
+  }
+
+  noteToolItem(item: { runId: string | null; nativeId: string | null; name: string | null }): void {
     if (!item.runId || !item.nativeId || !item.name) return;
     const name = item.name;
     const turn = this.turns.get(item.runId);
@@ -118,10 +112,9 @@ export class TurnLedger {
     const known = turn.items.get(item.nativeId);
     if (known) {
       known.name = name;
-      known.input = canonicalInput(item.input) ?? known.input;
     } else {
       if (turn.items.size >= ITEMS_PER_TURN_LIMIT) turn.items.delete(turn.items.keys().next().value!);
-      turn.items.set(item.nativeId, { nativeId: item.nativeId, name, input: canonicalInput(item.input), claimed: false });
+      turn.items.set(item.nativeId, { nativeId: item.nativeId, name, claimed: false });
     }
     this.wake();
   }
@@ -148,13 +141,11 @@ export class TurnLedger {
   }
 
   private claim(threadId: string, call: ToolCallInfo): Turn | null {
-    const wanted = call.toolUseId === null ? canonicalInput(call.input) : null;
+    if (call.toolUseId === null) return null;
     for (const turn of this.turns.values()) {
       if (turn.threadId !== threadId) continue;
       for (const item of turn.items.values()) {
-        if (item.claimed) continue;
-        const matches = call.toolUseId !== null ? item.nativeId === call.toolUseId : toolOf(item.name) === call.tool && item.input !== null && item.input === wanted;
-        if (!matches) continue;
+        if (item.claimed || item.nativeId !== call.toolUseId || toolOf(item.name) !== call.tool) continue;
         item.claimed = true;
         return turn;
       }
@@ -164,7 +155,7 @@ export class TurnLedger {
 
   private refusalFor(threadId: string): TurnRefusal {
     for (const turn of this.turns.values()) if (turn.threadId === threadId && turn.stopped) return "stopped";
-    return this.held.has(threadId) ? "stopped" : "unknown";
+    return "unknown";
   }
 
   private end(runId: string): void {

@@ -109,10 +109,10 @@ export const ArdiaToolCall = Context.Reference<ToolCallInfo | null>("ardia/Ardia
 const TOOL_USE_KEY = "claudecode/toolUseId";
 
 export const callMiddleware = McpServer.middleware((effect, options) => {
-  const payload = (options.payload ?? {}) as { arguments?: unknown; _meta?: unknown; metadata?: unknown };
-  const meta = (payload._meta ?? payload.metadata ?? {}) as Record<string, unknown>;
+  const payload = (options.payload ?? {}) as { _meta?: unknown; metadata?: unknown };
+  const meta = (payload._meta ?? payload.metadata ?? options.requestContext?.requestMetadata ?? {}) as Record<string, unknown>;
   const id = meta[TOOL_USE_KEY];
-  const call: ToolCallInfo = { toolUseId: typeof id === "string" && id.length > 0 && id.length <= 200 ? id : null, tool: options.target, input: payload.arguments ?? {} };
+  const call: ToolCallInfo = { toolUseId: typeof id === "string" && id.length > 0 && id.length <= 200 ? id : null, tool: options.target };
   return Effect.provideService(effect, ArdiaToolCall, call);
 });
 

@@ -81,6 +81,7 @@ export class Channel {
         if (!waiting) return;
         clearTimeout(waiting.timer);
         this.pending.delete(id);
+        if (method !== "cancel") void this.request("cancel", { request: id }).catch(() => undefined);
         reject(new ChannelRequestError({ code: "aborted", message: `${method} was cancelled.` }));
       };
       const timer = setTimeout(() => {

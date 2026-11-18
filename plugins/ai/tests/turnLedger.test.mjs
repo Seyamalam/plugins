@@ -53,7 +53,11 @@ function runtime({ turnStop = async () => {}, split = false, readPages = true } 
   });
   const deps = { host, state: { memory, asks }, ledger, turns: { stop: turnStop }, values: () => ({}), appVersion: "", workspaceRoot: "", count: () => {} };
   let nextTool = 1;
-  const launch = (runId, ordinal, { thread = CHAT, session = "s1", messageId } = {}) => ledger.launched({ threadId: thread, runId, providerTurn: providerTurnKey(`pt-${thread}`, ordinal), session, messageId });
+  const launch = (runId, ordinal, { thread = CHAT, session = "s1", messageId, sent = messageId === undefined } = {}) => {
+    const id = messageId ?? `m-${runId}`;
+    if (sent) ledger.allow(thread, id);
+    ledger.launched({ threadId: thread, runId, providerTurn: providerTurnKey(`pt-${thread}`, ordinal), session, messageId: id });
+  };
   const announce = (runId, tool, input = {}) => {
     const id = `toolu_${nextTool++}`;
     ledger.noteToolItem({ runId, nativeId: id, name: `mcp__t3-code__${tool}`, input });
@@ -99,6 +103,7 @@ test("a call from a turn that already ended is refused even while another turn r
 
 test("Stop, then a run that was already on its way launches: it starts stopped; only the next sent message's turn is live", async () => {
   const r = runtime({ turnStop: async () => Promise.reject(new Error("projection read failed")) });
+  await r.api("/ardia/send", { tabs: [], messageId: "m-before-stop" });
   await r.api("/ardia/stop");
   r.launch("pending-run", 1, { messageId: "m-before-stop" });
   const pending = r.announce("pending-run", "ardia_click");
@@ -132,20 +137,46 @@ test("a call with no tool use, a foreign one or another chat's is refused", asyn
   r.launch("run-1", 1);
   await assert.rejects(r.toolCall(byId("toolu_nobody"), (ctx) => Tools.click(ctx, CHAT, "doc", "@e1")), refusedAs("unknown"));
   await assert.rejects(r.toolCall(byId(foreign), (ctx) => Tools.click(ctx, CHAT, "doc", "@e1")), refusedAs("unknown"), "another chat's tool use never counts here");
-  await assert.rejects(r.toolCall({ toolUseId: null, tool: "ardia_click", input: { tab: "doc", ref: "@e1" } }, (ctx) => Tools.click(ctx, CHAT, "doc", "@e1")), refusedAs("unknown"));
+  await assert.rejects(r.toolCall({ toolUseId: null, tool: "ardia_click" }, (ctx) => Tools.click(ctx, CHAT, "doc", "@e1")), refusedAs("unknown"));
   assert.equal(r.ledger.stop(CHAT), 1);
   assert.equal((await r.ledger.attribute(OTHER, byId(foreign), SHORT_WAIT)).ok, true, "Stop in one chat leaves another chat's turn alone");
   assert.deepEqual(clicks(r.host), []);
 });
 
-test("without a tool-use id, a call matches the running turn's announced item by tool and input, once", async () => {
+test("a call without a tool-use id is refused, even when a live turn announced an identical one", async () => {
   const r = runtime();
   r.launch("run-1", 1);
   r.announce("run-1", "ardia_click", { ref: "@e1", tab: "doc" });
-  const call = { toolUseId: null, tool: "ardia_click", input: { tab: "doc", ref: "@e1" } };
-  await r.toolCall(call, (ctx) => Tools.click(ctx, CHAT, "doc", "@e1"));
-  await assert.rejects(r.toolCall(call, (ctx) => Tools.click(ctx, CHAT, "doc", "@e1")), refusedAs("unknown"), "an item is claimed by one call only");
-  assert.deepEqual(clicks(r.host), ["@e1"]);
+  await assert.rejects(r.toolCall({ toolUseId: null, tool: "ardia_click" }, (ctx) => Tools.click(ctx, CHAT, "doc", "@e1")), refusedAs("unknown"));
+  const id = r.announce("run-1", "ardia_click");
+  await assert.rejects(r.toolCall(byId(id, "ardia_close_tab"), (ctx) => Tools.click(ctx, CHAT, "doc", "@e1")), refusedAs("unknown"), "the id must belong to the same tool");
+  assert.deepEqual(clicks(r.host), []);
+});
+
+test("after Stop, an older pending run that launches after the new message's turn still starts stopped", async () => {
+  const r = runtime();
+  await r.api("/ardia/send", { tabs: [], messageId: "m-old" });
+  await r.api("/ardia/stop");
+  await r.api("/ardia/send", { tabs: [], messageId: "m-new" });
+  r.launch("run-new", 2, { messageId: "m-new", sent: false });
+  r.launch("run-old", 1, { messageId: "m-old", sent: false });
+  const old = r.announce("run-old", "ardia_click");
+  const fresh = r.announce("run-new", "ardia_click");
+  await assert.rejects(r.toolCall(byId(old), (ctx) => Tools.click(ctx, CHAT, "doc", "@e1")), refusedAs("stopped"));
+  await r.toolCall(byId(fresh), (ctx) => Tools.click(ctx, CHAT, "doc", "@e2"));
+  assert.deepEqual(clicks(r.host), ["@e2"]);
+});
+
+test("forgetting what was sent only ever refuses: a sent message pushed out of the bound starts its turn stopped", async () => {
+  const r = runtime();
+  await r.api("/ardia/send", { tabs: [], messageId: "m-early" });
+  for (let i = 0; i < 10_000; i++) r.ledger.allow(`thread-${i}`, `m-${i}`);
+  r.launch("run-early", 1, { messageId: "m-early", sent: false });
+  const id = r.announce("run-early", "ardia_click");
+  await assert.rejects(r.toolCall(byId(id), (ctx) => Tools.click(ctx, CHAT, "doc", "@e1")), refusedAs("stopped"));
+  r.launch("run-unsent", 2, { messageId: "m-never-sent", sent: false });
+  const unsent = r.announce("run-unsent", "ardia_click");
+  await assert.rejects(r.toolCall(byId(unsent), (ctx) => Tools.click(ctx, CHAT, "doc", "@e1")), refusedAs("stopped"), "a turn for a message the page never sent has no tools");
 });
 
 test("a call that arrives before its tool item waits for it", async () => {
@@ -191,7 +222,7 @@ test("when the provider session goes away without a terminal, its turns end and 
   release();
   await assert.rejects(typing, refusedAs("ended"));
   assert.deepEqual(r.host.calls.filter((c) => c[0] === "browse").map((c) => c[2]), [], "nothing reached the page");
-  assert.equal(r.ledger.size, 1, "only the other session's turn is left");
+  assert.equal(r.ledger.turnCount, 1, "only the other session's turn is left");
 });
 
 test("finished turns are forgotten, so the ledger doesn't grow with every chat", () => {

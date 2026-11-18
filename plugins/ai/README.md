@@ -63,13 +63,15 @@ plugins/ai/
 - **Stop** belongs to a turn (`runtime/src/turnLedger.ts`, patch `0004-turn-ledger`). T3 tells the ledger when it
   launches a provider turn (with the message it answers) and when the turn ends or its provider session goes away, and
   the event pump hands it every tool item the provider announces (its tool-use id and run). A tool call is tied to the
-  turn that issued it: Claude Code sends `_meta["claudecode/toolUseId"]` on every MCP call, which an MCP middleware
-  reads, and the call must match an announced item of a turn on the calling thread (by that id, or without one by tool
-  and input, each item once); it waits up to 5 s for the item and is refused if none matches, so an old turn's late
-  call never gets a newer turn's authority. Stop aborts every turn of the chat for good and holds the chat: a turn T3
-  launches afterwards starts stopped unless it answers the message the page named in its next `/ardia/send`.
-  `thread.stop` runs in-process. Tools check their turn before every host call, after every host reply and when a
-  permission ask settles; a subagent caller is refused. Finished turns are dropped at once.
+  tool use that issued it: Claude Code sends `_meta["claudecode/toolUseId"]` on every MCP call, an MCP middleware reads
+  it (from the call or the request context), and it must match an item of the same tool announced by a turn on the
+  calling thread; the call waits up to 5 s for the item and is refused otherwise, as is any call without an id. So an
+  old turn's late call never gets a newer turn's authority. A turn starts live only if it answers a message the page
+  sent through `/ardia/send` (which names its `messageId`, also given to `launchThread`); Stop aborts every turn of the
+  chat for good and forgets the chat's sent messages, so a run already on its way starts stopped, and anything this
+  bookkeeping forgets only refuses. `thread.stop` runs in-process. Tools check their turn before every host call, after
+  every host reply and when a permission ask settles, and an aborted host request is cancelled on the host
+  (`cancel`), so a queued browse or apply never runs. A subagent caller is refused. Finished turns are dropped at once.
 - **Tools** (`runtime/src/browserToolkit.ts`) are an MCP toolkit in T3's MCP server, which T3 already gives every
   provider session with a bearer of its own, so a call always knows its chat (`McpInvocationContext`; a chat can't
   act as another). It replaces T3's own toolkits: an agent in Ardia gets `ardia_chat_context`, `ardia_list_tabs`,

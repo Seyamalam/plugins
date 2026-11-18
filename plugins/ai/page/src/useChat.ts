@@ -93,7 +93,7 @@ export function useChat(chatId: string) {
               runtimeMode: "full-access",
               interactionMode: "default",
               workspaceStrategy: { type: "root" },
-              initialMessage: { text: body, attachments: [] },
+              initialMessage: { messageId, text: body, attachments: [] },
             } as never),
           );
           setExists(true);

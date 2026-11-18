@@ -52,7 +52,7 @@ diff --git a/apps/server/src/orchestration-v2/ProviderSessionManager.ts b/apps/s
                        : Effect.void,
                  ),
                ),
-@@ -2802,6 +2817,14 @@
+@@ -2802,6 +2817,13 @@
              }
              const tracked = retryStalls.track(nativeEvent);
              const event = tracked.event;
@@ -61,13 +61,12 @@ diff --git a/apps/server/src/orchestration-v2/ProviderSessionManager.ts b/apps/s
 +                runId: event.turnItem.runId,
 +                nativeId: event.turnItem.nativeItemRef?.nativeId ?? null,
 +                name: event.turnItem.toolName,
-+                input: event.turnItem.input,
 +              });
 +            }
              const armRetryStall = retryStalls.update(tracked);
              const releaseLiveOutput =
                event.type === "turn_item.updated" &&
-@@ -2823,10 +2846,16 @@
+@@ -2823,10 +2845,16 @@
              return observeActivity(
                entry.runtime.providerSessionId,
                event.type === "turn.terminal"

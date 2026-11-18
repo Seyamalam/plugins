@@ -74,3 +74,15 @@ test("a tool call is answered with result, or with an error when the handler thr
   assert.equal(results.find((r) => r.call === "c2").error.message, "nope");
   for (const line of p.lines.filter((l) => l.method === "result")) p.send({ id: line.id, result: { ok: true } });
 });
+
+test("an aborted request tells Ardia to cancel it, so queued work never runs", async () => {
+  const p = pair();
+  const channel = new Channel(p.transport);
+  const controller = new AbortController();
+  const browsing = channel.request("browse", { tab: "t1", argv: ["click", "@e1"] }, 1000, controller.signal);
+  const id = p.lines[0].id;
+  controller.abort();
+  await assert.rejects(browsing, (e) => e.code === "aborted");
+  assert.deepEqual(p.lines.slice(1).map((l) => [l.method, l.params]), [["cancel", { request: id }]]);
+  p.send({ id: p.lines[1].id, result: { ok: true, cancelled: true } });
+});
