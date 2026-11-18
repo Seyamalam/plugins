@@ -39,8 +39,25 @@ function NewChat() {
   return null;
 }
 
+function useLinksThroughHelper() {
+  const session = useSession();
+  useEffect(() => {
+    const open = session.openUrl;
+    if (!open) return;
+    const onClick = (event: MouseEvent) => {
+      const link = (event.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!link || !/^https?:/i.test(link.href)) return;
+      event.preventDefault();
+      open(link.href);
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }, [session.openUrl]);
+}
+
 function Screen() {
   const session = useSession();
+  useLinksThroughHelper();
   const route = routeOf(location.pathname);
   if (session.error && session.connected === false) return <RuntimeStopped />;
   if (route.kind === "history") return <History />;

@@ -4,21 +4,31 @@ export type ChatEvents = { version: number; asks: Ask[]; stopped: boolean; value
 export type TabSummary = { id: string; title: string; url: string; favicon: string | null; window: string; active: boolean; inChatGroup: boolean; inChatSplit: boolean; tagged: boolean; openedByYou: boolean };
 export type ChatTabs = { chatTab: string | null; group: string | null; split: string | null; splitTabs: string[]; tabs: TabSummary[] };
 
-export class ArdiaApi {
-  private readonly bearer: string;
+export type ApiRequest = (method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal) => Promise<unknown>;
 
-  constructor(bearer: string) {
-    this.bearer = bearer;
-  }
-
-  private async request<T>(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-    const init: RequestInit = { method, headers: body === undefined ? { authorization: `Bearer ${this.bearer}` } : { authorization: `Bearer ${this.bearer}`, "content-type": "application/json" } };
+export function fetchRequest(bearer: string): ApiRequest {
+  return async (method, path, body, signal) => {
+    const init: RequestInit = { method, headers: body === undefined ? { authorization: `Bearer ${bearer}` } : { authorization: `Bearer ${bearer}`, "content-type": "application/json" } };
     if (body !== undefined) init.body = JSON.stringify(body);
     if (signal) init.signal = signal;
     const response = await fetch(path, init);
-    const json = (await response.json().catch(() => ({}))) as T & { error?: string };
+    const json = (await response.json().catch(() => ({}))) as { error?: string };
     if (!response.ok) throw new Error(json.error ?? `The assistant answered ${response.status}.`);
     return json;
+  };
+}
+
+export class ArdiaApi {
+  private readonly transport: ApiRequest;
+
+  constructor(transport: ApiRequest) {
+    this.transport = transport;
+  }
+
+  private async request<T>(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    const result = await this.transport(method, path, body, signal);
+    if (signal?.aborted) throw new Error("aborted");
+    return result as T;
   }
 
   info() {

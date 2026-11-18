@@ -7,6 +7,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Socket from "effect/socket/Socket";
 import { RpcClient, RpcSerialization } from "effect/rpc";
+import type { ChannelLink } from "./channelLink";
 
 const BEARER_KEY = `ardia.ai.bearer.${location.port}`;
 const KEY_KEY = `ardia.ai.key.${location.port}`;
@@ -77,6 +78,25 @@ export type Connection = {
   subscribe<A>(make: (client: Client) => Stream.Stream<A, unknown, never>, onItem: (item: A) => void, onEnd: (error: unknown) => void): () => void;
   close(): void;
 };
+
+type Recorded = { method: string; payload: unknown };
+
+const recorder = new Proxy({}, { get: (_, method) => (payload: unknown): Recorded => ({ method: String(method), payload }) }) as unknown as Client;
+
+export function channelConnection(link: ChannelLink): Connection {
+  return {
+    bearer: "",
+    call: (make) => {
+      const { method, payload } = make(recorder) as unknown as Recorded;
+      return link.call(method, payload) as Promise<never>;
+    },
+    subscribe: (make, onItem, onEnd) => {
+      const { method, payload } = make(recorder) as unknown as Recorded;
+      return link.stream(method, payload, onItem as (item: unknown) => void, onEnd);
+    },
+    close: () => link.close(),
+  };
+}
 
 export async function connect(bearer: string): Promise<Connection> {
   const ticketResponse = await fetch("/api/auth/websocket-ticket/rpc", { method: "POST", headers: { authorization: `Bearer ${bearer}` } });

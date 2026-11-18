@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArdiaApi, type Values } from "./api";
-import { connect, signIn, type Connection } from "./connection";
+import type { ArdiaApi, Values } from "./api";
+import type { Connection } from "./connection";
+import { openTransport } from "./transport";
 import { modelOptions, type ModelOption, type ProviderInfo } from "./models";
 import { applyShell, type ShellThread } from "./shellState";
 
@@ -18,6 +19,7 @@ export type Session = {
   threads: ShellThread[];
   shellLoaded: boolean;
   values: Values;
+  openUrl: ((url: string) => void) | null;
   refreshProviders(): Promise<void>;
   ensureProject(): Promise<string>;
   setValues(values: Values): void;
@@ -28,6 +30,8 @@ const SessionContext = createContext<Session | null>(null);
 export const useSession = () => useContext(SessionContext)!;
 
 const HEARTBEAT_MS = 10_000;
+const INFO_RETRIES = [1000, 2000, 4000, 8000, 16000];
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [connection, setConnection] = useState<Connection | null>(null);
@@ -40,6 +44,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [shellLoaded, setShellLoaded] = useState(false);
   const [values, setValues] = useState<Values>({});
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
+  const [openUrl, setOpenUrl] = useState<((url: string) => void) | null>(null);
   const live = useRef<Connection | null>(null);
   const shellMap = useRef(new Map<string, ShellThread>());
 
@@ -52,20 +57,31 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let stopShell: (() => void) | null = null;
     let cancelled = false;
+    let healthy: (() => Promise<boolean>) | null = null;
     (async () => {
       try {
-        const bearer = await signIn();
-        const conn = await connect(bearer);
+        const transport = await openTransport();
+        const conn = transport.connection;
         if (cancelled) return conn.close();
         live.current = conn;
-        const ardia = new ArdiaApi(bearer);
+        healthy = transport.healthy;
+        const ardia = transport.api;
         setConnection(conn);
         setApi(ardia);
+        setOpenUrl(() => transport.openUrl);
         setConnected(true);
-        void ardia.info().then((info) => {
-          setValues(info.values);
-          setWorkspaceRoot(info.workspaceRoot);
-        }).catch(() => undefined);
+        void (async () => {
+          for (const delay of [0, ...INFO_RETRIES]) {
+            if (cancelled) return;
+            if (delay) await wait(delay);
+            const info = await ardia.info().catch(() => null);
+            if (info) {
+              setValues(info.values);
+              setWorkspaceRoot(info.workspaceRoot);
+              return;
+            }
+          }
+        })();
         await loadProviders(conn, false);
         stopShell = conn.subscribe(
           (c) => c["orchestration.subscribeShell"]({} as never),
@@ -84,10 +100,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
     })();
     const beat = setInterval(() => {
-      fetch("/.well-known/t3/environment", { cache: "no-store" }).then(
-        (r) => !r.ok && setConnected(false),
-        () => setConnected(false),
-      );
+      if (healthy) void healthy().then((ok) => setConnected(ok));
     }, HEARTBEAT_MS);
     return () => {
       cancelled = true;
@@ -109,20 +122,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       threads,
       shellLoaded,
       values,
+      openUrl,
       refreshProviders: () => (connection ? loadProviders(connection, true) : Promise.resolve()),
       ensureProject: async () => {
         if (projectId) return projectId;
         if (!connection || !workspaceRoot) throw new Error("The assistant is still getting ready. Try again in a moment.");
         const id = "ardia-workspace";
-        await connection
-          .call((c) => c["projects.mutate"]({ type: "project.create", commandId: crypto.randomUUID(), projectId: id, title: "Ardia", workspaceRoot, createWorkspaceRootIfMissing: true } as never))
-          .catch(() => undefined);
+        await connection.call((c) => c["projects.mutate"]({ type: "project.create", commandId: crypto.randomUUID(), projectId: id, title: "Ardia", workspaceRoot, createWorkspaceRootIfMissing: true } as never));
         setProjectId(id);
         return id;
       },
       setValues,
     }),
-    [connection, api, connected, error, providers, projectId, threads, shellLoaded, values, workspaceRoot, loadProviders],
+    [connection, api, connected, error, providers, projectId, threads, shellLoaded, values, workspaceRoot, openUrl, loadProviders],
   );
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
