@@ -1,8 +1,9 @@
 // @effect-diagnostics effectFnOpportunity:off
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { McpSchema, Tool, Toolkit } from "effect/ai";
+import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as McpToolAccess from "../mcp/McpToolAccess.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -10,7 +11,7 @@ import * as Tools from "./browserTools.ts";
 import { ardiaHost } from "./host.ts";
 import { channelHost } from "./hostApi.ts";
 import { countUse, pluginState } from "./state.ts";
-import { type TurnRefusal, turnLedger } from "./turnLedger.ts";
+import { ATTRIBUTION_WAIT_MS, type ToolCallInfo, type TurnRefusal, turnLedger } from "./turnLedger.ts";
 
 const TabId = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)).annotate({ description: "A tab id from ardia_chat_context or ardia_list_tabs." });
 const Ref = Schema.String.check(Schema.isMinLength(2), Schema.isMaxLength(200)).annotate({ description: "An element ref from ardia_read_tab, such as @e12, or a CSS selector." });
@@ -21,7 +22,7 @@ const annotateTool = <T extends Tool.Any>(tool: T, readonly: boolean): T =>
     .annotate(Tool.Readonly, readonly)
     .annotate(Tool.Destructive, false)
     .annotate(Tool.OpenWorld, true)
-    .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients)
+    .annotate(McpSchema.EnabledWhen, () => McpInvocationContext.hiddenFromOutsideClients() && McpInvocationContext.hiddenFromSubagents())
     .annotate(Tool.Meta, { "anthropic/alwaysLoad": true }) as T;
 
 const shared = {
@@ -103,10 +104,22 @@ const FAILURE_CODES: Record<string, OrchestratorMcpFailure["code"]> = {
   no_chat_tab: "invalid_request",
 };
 
+export const ArdiaToolCall = Context.Reference<ToolCallInfo | null>("ardia/ArdiaToolCall", { defaultValue: () => null });
+
+const TOOL_USE_KEY = "claudecode/toolUseId";
+
+export const callMiddleware = McpServer.middleware((effect, options) => {
+  const payload = (options.payload ?? {}) as { arguments?: unknown; _meta?: unknown; metadata?: unknown };
+  const meta = (payload._meta ?? payload.metadata ?? {}) as Record<string, unknown>;
+  const id = meta[TOOL_USE_KEY];
+  const call: ToolCallInfo = { toolUseId: typeof id === "string" && id.length > 0 && id.length <= 200 ? id : null, tool: options.target, input: payload.arguments ?? {} };
+  return Effect.provideService(effect, ArdiaToolCall, call);
+});
+
 const REFUSALS: Record<TurnRefusal, string> = {
   stopped: Tools.STOPPED_MESSAGE,
   ended: Tools.ENDED_MESSAGE,
-  unknown: "Ardia doesn't know which turn this call belongs to, so it can't use tabs.",
+  unknown: "Ardia couldn't tie this call to a turn that's running, so it can't use tabs.",
 };
 
 const failure = (error: unknown) =>
@@ -123,7 +136,10 @@ const run = <A>(body: (ctx: Tools.ToolContext, chatId: string) => Promise<A>) =>
     if (!chatId) return yield* new OrchestratorMcpFailure({ code: "thread_credential_required", message: "Only a chat can use Ardia's tabs." });
     if (!host || host.channel.isClosed) return yield* new OrchestratorMcpFailure({ code: "orchestration_error", message: "Ardia isn't connected." });
     const state = pluginState(host.dataDir);
-    const found = turnLedger.lookup(chatId);
+    if (scope.thread?.subagent === true) return yield* new OrchestratorMcpFailure({ code: "capability_denied", message: "Only the chat itself can use Ardia's tabs, not a task it hands off." });
+    const call = yield* ArdiaToolCall;
+    if (!call) return yield* new OrchestratorMcpFailure({ code: "capability_denied", message: REFUSALS.unknown });
+    const found = yield* Effect.promise((signal) => turnLedger.attribute(chatId, call, ATTRIBUTION_WAIT_MS, signal));
     if (!found.ok) {
       state.telemetry.count(`tool_refused_${found.refusal}`);
       return yield* new OrchestratorMcpFailure({ code: "capability_denied", message: REFUSALS[found.refusal] });

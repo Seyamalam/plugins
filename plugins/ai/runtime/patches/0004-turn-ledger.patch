@@ -9,17 +9,27 @@ diff --git a/apps/server/src/orchestration-v2/ProviderSessionManager.ts b/apps/s
  
  const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
  const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
-@@ -2507,10 +2508,21 @@
+@@ -1353,6 +1354,7 @@
+               onNone: () => Effect.void,
+               onSome: (entry) =>
+                 Effect.gen(function* () {
++                  yield* Effect.sync(() => turnLedger.endSession(input.providerSessionId));
+                   const detachedThread =
+                     input.detachedThreadId === undefined
+                       ? {}
+@@ -2507,10 +2509,23 @@
                      ),
                    ),
                    () =>
 -                    runtime.startTurn(input).pipe(turnMetrics("send", input.modelSelection.model)),
 +                    Effect.sync(() =>
-+                      turnLedger.launched(
-+                        input.threadId,
-+                        input.runId,
-+                        providerTurnKey(input.providerThread.id, input.runOrdinal),
-+                      ),
++                      turnLedger.launched({
++                        threadId: input.threadId,
++                        runId: input.runId,
++                        providerTurn: providerTurnKey(input.providerThread.id, input.runOrdinal),
++                        session: providerSessionId,
++                        messageId: input.message.messageId,
++                      }),
 +                    ).pipe(
 +                      Effect.andThen(runtime.startTurn(input)),
 +                      turnMetrics("send", input.modelSelection.model),
@@ -33,7 +43,7 @@ diff --git a/apps/server/src/orchestration-v2/ProviderSessionManager.ts b/apps/s
                            providerSessionId,
                            markIdle(providerSessionId, input.providerThread.id, input.runOrdinal),
                          ).pipe(
-@@ -2523,7 +2535,7 @@
+@@ -2523,7 +2538,7 @@
                                runtime,
                              }),
                            ),
@@ -42,7 +52,22 @@ diff --git a/apps/server/src/orchestration-v2/ProviderSessionManager.ts b/apps/s
                        : Effect.void,
                  ),
                ),
-@@ -2823,10 +2835,16 @@
+@@ -2802,6 +2817,14 @@
+             }
+             const tracked = retryStalls.track(nativeEvent);
+             const event = tracked.event;
++            if (event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool") {
++              turnLedger.noteToolItem({
++                runId: event.turnItem.runId,
++                nativeId: event.turnItem.nativeItemRef?.nativeId ?? null,
++                name: event.turnItem.toolName,
++                input: event.turnItem.input,
++              });
++            }
+             const armRetryStall = retryStalls.update(tracked);
+             const releaseLiveOutput =
+               event.type === "turn_item.updated" &&
+@@ -2823,10 +2846,16 @@
              return observeActivity(
                entry.runtime.providerSessionId,
                event.type === "turn.terminal"
@@ -63,3 +88,17 @@ diff --git a/apps/server/src/orchestration-v2/ProviderSessionManager.ts b/apps/s
                    )
                  : metadataOnly
                    ? Effect.void
+diff --git a/apps/server/src/mcp/McpHttpServer.ts b/apps/server/src/mcp/McpHttpServer.ts
+--- a/apps/server/src/mcp/McpHttpServer.ts
++++ b/apps/server/src/mcp/McpHttpServer.ts
+@@ -1345,7 +1345,9 @@
+ 
+ /** Every tool the T3 MCP server advertises. AgentContextBudget.test.ts measures this set. */
+ export const layerTools = Layer.mergeAll(
+-  toolkitRegistration(ArdiaBrowserToolkit.ArdiaBrowserToolkit, ArdiaBrowserToolkit.layer),
++  toolkitRegistration(ArdiaBrowserToolkit.ArdiaBrowserToolkit, ArdiaBrowserToolkit.layer).pipe(
++    Layer.provide(ArdiaBrowserToolkit.callMiddleware.layer),
++  ),
+   layerMessageToolkit,
+ );
+ 

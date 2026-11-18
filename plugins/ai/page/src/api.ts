@@ -39,8 +39,8 @@ export class ArdiaApi {
     return this.request<ChatTabs>("GET", `/ardia/tabs?chat=${encodeURIComponent(chat)}`);
   }
 
-  send(chat: string, tabs: string[]) {
-    return this.request<{ group: string | null }>("POST", "/ardia/send", { chat, tabs });
+  send(chat: string, tabs: string[], messageId: string) {
+    return this.request<{ group: string | null }>("POST", "/ardia/send", { chat, tabs, messageId });
   }
 
   stop(chat: string) {

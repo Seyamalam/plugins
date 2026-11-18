@@ -10,11 +10,11 @@ export type BrowseResult = { ok: boolean; text?: string; error?: string };
 export type HostApi = {
   workspace(): Promise<Workspace>;
   browse(tabId: string, argv: string[], signal?: AbortSignal): Promise<BrowseResult>;
-  openTab(url: string, place: { windowId: string; group: string | null; activate: boolean }): Promise<{ tabId: string; group: string | null }>;
-  closeTab(tabId: string): Promise<void>;
-  activateTab(tabId: string): Promise<void>;
-  groupWithChat(chatTabId: string, tabIds: string[]): Promise<{ group: string }>;
-  splitToGroup(chatTabId: string): Promise<{ group: string }>;
+  openTab(url: string, activate: boolean, signal?: AbortSignal): Promise<{ tabId: string }>;
+  closeTab(tabId: string, signal?: AbortSignal): Promise<void>;
+  activateTab(tabId: string, signal?: AbortSignal): Promise<void>;
+  groupWithChat(chatTabId: string, tabIds: string[], signal?: AbortSignal): Promise<{ group: string }>;
+  splitToGroup(chatTabId: string, signal?: AbortSignal): Promise<{ group: string }>;
   banner(tabId: string, text: string | null): Promise<void>;
 };
 
@@ -207,13 +207,18 @@ export async function openTab(ctx: ToolContext, chatId: string, url: string, gro
   }
   const snap = await snapshot(ctx, chatId);
   if (decision.outcome === "ask") await permit(ctx, chatId, "open_tab", "open", undefined, snap, url, decision);
-  const windowId = snap.place.chatTab?.windowId;
-  if (!windowId) throw new ToolFailure("no_chat_tab", "This chat isn't open in a tab, so there's no window to open the tab in.");
-  const target = group === "chat" ? snap.place.group : null;
-  const opened = await ctx.host.openTab(url, { windowId, group: target, activate });
+  const chatTab = snap.place.chatTab;
+  if (!chatTab) throw new ToolFailure("no_chat_tab", "This chat isn't open in a tab, so there's no window to open the tab in.");
+  turnGuard(ctx);
+  const opened = await ctx.host.openTab(url, activate, ctx.turn.signal);
   ctx.memory.noteOpened(chatId, opened.tabId, originOf(url));
   if (decision.outcome === "allow") ctx.onUse?.({ tool: "open_tab", kind: "open", outcome: "allowed" });
-  const inChatGroup = !!snap.place.group && opened.group === snap.place.group;
+  let placed: string | null = null;
+  if (group === "chat" && snap.place.group) {
+    turnGuard(ctx);
+    placed = (await ctx.host.groupWithChat(chatTab.id, [opened.tabId], ctx.turn.signal)).group;
+  }
+  const inChatGroup = !!snap.place.group && placed === snap.place.group;
   const note = inChatGroup
     ? "The tab is in this chat's group."
     : group === "chat" && snap.place.split
@@ -221,14 +226,15 @@ export async function openTab(ctx: ToolContext, chatId: string, url: string, gro
       : group === "chat"
         ? "The tab is NOT in a group: this chat has no group yet. Add it with ardia_add_to_chat_group."
         : "The tab is outside this chat's group.";
-  return { tab: opened.tabId, group: opened.group, inChatGroup, note };
+  return { tab: opened.tabId, group: placed, inChatGroup, note };
 }
 
 export async function closeTab(ctx: ToolContext, chatId: string, tabId: string) {
   const snap = await snapshot(ctx, chatId);
   const tab = findTab(snap, tabId);
   await permit(ctx, chatId, "close_tab", "close", tab, snap, null);
-  await ctx.host.closeTab(tab!.id);
+  turnGuard(ctx);
+  await ctx.host.closeTab(tab!.id, ctx.turn.signal);
   return { closed: tab!.id };
 }
 
@@ -236,7 +242,8 @@ export async function activateTab(ctx: ToolContext, chatId: string, tabId: strin
   const snap = await snapshot(ctx, chatId);
   const tab = findTab(snap, tabId);
   await permit(ctx, chatId, "activate_tab", "activate", tab, snap, null);
-  await ctx.host.activateTab(tab!.id);
+  turnGuard(ctx);
+  await ctx.host.activateTab(tab!.id, ctx.turn.signal);
   return { active: tab!.id };
 }
 
@@ -248,7 +255,8 @@ export async function addToChatGroup(ctx: ToolContext, chatId: string, tabIds: s
     throw new ToolFailure("in_split", "This chat is in a Split View, so it has no group. Turn the split into the chat's group with ardia_split_to_group first.");
   }
   for (const id of tabIds) await permit(ctx, chatId, "add_to_chat_group", "group", findTab(snap, id), snap, null);
-  const { group } = await ctx.host.groupWithChat(chatTab.id, tabIds);
+  turnGuard(ctx);
+  const { group } = await ctx.host.groupWithChat(chatTab.id, tabIds, ctx.turn.signal);
   return { group, tabs: tabIds };
 }
 
@@ -258,7 +266,8 @@ export async function splitToGroup(ctx: ToolContext, chatId: string) {
   const chatTab = snap.place.chatTab;
   if (!chatTab) throw new ToolFailure("no_chat_tab", "This chat isn't open in a tab.");
   if (!snap.place.split) throw new ToolFailure("not_in_split", snap.place.group ? "This chat is already in a group." : "This chat isn't in a Split View.");
-  const { group } = await ctx.host.splitToGroup(chatTab.id);
+  turnGuard(ctx);
+  const { group } = await ctx.host.splitToGroup(chatTab.id, ctx.turn.signal);
   ctx.onUse?.({ tool: "split_to_group", kind: "group", outcome: "allowed" });
   return { group, tabs: [chatTab.id, ...snap.place.splitTabs] };
 }

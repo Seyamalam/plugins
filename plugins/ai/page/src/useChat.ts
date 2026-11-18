@@ -62,7 +62,8 @@ export function useChat(chatId: string) {
       if (!connection || !api) return;
       setSendError(null);
       try {
-        await api.send(chatId, tags.map((t) => t.id));
+        const messageId = uuid();
+        await api.send(chatId, tags.map((t) => t.id), messageId);
         const body = withTags(text, tags);
         if (exists) {
           await connection.call((c) =>
@@ -72,7 +73,7 @@ export function useChat(chatId: string) {
               creationSource: "web",
               commandId: uuid(),
               threadId: chatId,
-              messageId: uuid(),
+              messageId,
               text: body,
               attachments: [],
               modelSelection: { instanceId: model.instanceId, model: model.slug },

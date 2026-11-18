@@ -20,7 +20,7 @@ export type ApiDeps = {
   startLogin: (provider: "claude" | "codex") => Promise<void>;
   count: (counter: Counter) => void;
   turns?: TurnControl | undefined;
-  ledger: Pick<TurnLedger, "stop">;
+  ledger: Pick<TurnLedger, "stop" | "allow">;
 };
 
 export type TurnControl = {
@@ -136,6 +136,9 @@ export async function handleApi(method: string, path: string, query: URLSearchPa
       if (!chat) return bad("Needs a chat.");
       const tabs = tabList(input.tabs ?? []);
       if (!tabs) return bad("tabs must be a list of up to 20 tab ids.");
+      const messageId = str(input.messageId, 100);
+      if (!messageId) return bad("Needs the message's id.");
+      deps.ledger.allow(chat, messageId);
       deps.state.memory.noteSent(chat);
       if (deps.state.memory.startOnce(chat)) deps.count("chats_started");
       bumpChat(chat);

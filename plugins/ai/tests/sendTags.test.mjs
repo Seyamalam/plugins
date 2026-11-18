@@ -25,7 +25,7 @@ function deps({ split = false, grouped = false } = {}) {
         splitToGroup: async (chatTabId) => (calls.push(["splitToGroup", chatTabId]), { group: "g2" }),
       },
       state: { memory: { tag: () => {}, startOnce: () => false, noteSent: () => {}, noteStopped: () => {} }, asks: { cancelChat: () => {} } },
-      ledger: { stop: () => 0 },
+      ledger: { stop: () => 0, allow: () => {} },
       values: () => ({}),
       appVersion: "",
       workspaceRoot: "",
@@ -34,7 +34,7 @@ function deps({ split = false, grouped = false } = {}) {
   };
 }
 
-const send = (d, tabs) => handleApi("POST", "/ardia/send", new URLSearchParams(), { chat: CHAT, tabs }, d);
+const send = (d, tabs) => handleApi("POST", "/ardia/send", new URLSearchParams(), { chat: CHAT, tabs, messageId: "m-1" }, d);
 
 test("sending with only the split's own tab keeps the Split View", async () => {
   const w = deps({ split: true });

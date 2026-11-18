@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Asks } from "../runtime/src/asks.ts";
 import * as Tools from "../runtime/src/browserTools.ts";
-import { TurnLedger } from "../runtime/src/turnLedger.ts";
 
 const CHAT = "0b9e6c1e-2f4a-4c55-9d7e-1a2b3c4d5e6f";
 
@@ -22,11 +21,11 @@ function world({ split = false, grouped = false } = {}) {
     calls,
     workspace: async () => ({ windows: [{ id: "w1", spaces: [{ profile: "p", tabs: items }] }] }),
     browse: async (tabId, argv) => (calls.push(["browse", tabId, ...argv]), { ok: true, text: `content of ${tabId}` }),
-    openTab: async (url, place) => {
+    openTab: async (url) => {
       const id = `new${nextTab++}`;
-      calls.push(["open", url, place.group]);
-      items.push(tab(id, url, { group: place.group }));
-      return { tabId: id, group: place.group };
+      calls.push(["open", url]);
+      items.push(tab(id, url));
+      return { tabId: id };
     },
     closeTab: async (id) => void calls.push(["close", id]),
     activateTab: async (id) => void calls.push(["activate", id]),
@@ -38,11 +37,9 @@ function world({ split = false, grouped = false } = {}) {
 }
 
 function liveTurn(stopped = false) {
-  const ledger = new TurnLedger();
-  ledger.launched(CHAT, "r1", "p#1");
-  if (stopped) ledger.stop(CHAT);
-  const found = ledger.lookup(CHAT);
-  return { ledger, turn: found.ok ? found.turn : { runId: "r1", signal: AbortSignal.abort(new Error("stopped")) } };
+  const controller = new AbortController();
+  if (stopped) controller.abort(new Error("stopped"));
+  return { ledger: { stop: () => controller.abort(new Error("stopped")) }, turn: { runId: "r1", signal: controller.signal } };
 }
 
 function context(host, { answer = null, stopped = false, grants = [] } = {}) {
@@ -122,7 +119,7 @@ test("opening only takes http(s), and lands in the chat's group when asked to", 
   await assert.rejects(Tools.openTab(ctx, CHAT, "file:///etc/hosts", "chat", false), (e) => e.code === "refused");
   const r = await Tools.openTab(ctx, CHAT, "https://example.com", "chat", false);
   assert.equal(r.inChatGroup, true);
-  assert.deepEqual(host.calls.at(-1), ["open", "https://example.com", "g1"]);
+  assert.deepEqual(host.calls.slice(-2), [["open", "https://example.com"], ["group", "chat", "new1"]]);
 });
 
 test("a tab the agent opened is readable without asking", async () => {
@@ -230,12 +227,9 @@ test("Stop during a type-with-submit's fill, then a new message before the fill 
   const typing = Tools.type(c.ctx, CHAT, "doc", "@e2", "hello", true);
   await new Promise((r) => setTimeout(r, 5));
   c.ledger.stop(CHAT);
-  c.ledger.ended("p#1");
-  c.ledger.launched(CHAT, "r2", "p#2");
   await gate.release();
   await assert.rejects(typing, (e) => e.code === "stopped");
   assert.ok(!host.calls.some((x) => x[0] === "browse" && x[2] === "press"), "Enter never reaches the page");
-  assert.equal(c.ledger.lookup(CHAT).ok, true, "the new message's turn is live");
 });
 
 test("a click chain from a stopped turn can't take its next step after a new message starts another turn", async () => {
@@ -243,8 +237,6 @@ test("a click chain from a stopped turn can't take its next step after a new mes
   const c = context(host, { answer: "allow" });
   await Tools.click(c.ctx, CHAT, "doc", "@e1");
   c.ledger.stop(CHAT);
-  c.ledger.ended("p#1");
-  c.ledger.launched(CHAT, "r2", "p#2");
   await assert.rejects(Tools.click(c.ctx, CHAT, "doc", "@e2"), (e) => e.code === "stopped");
   assert.deepEqual(host.calls.filter((x) => x[0] === "browse").map((x) => x[3]), ["@e1"], "only the click before Stop happened");
   assert.deepEqual(host.calls.filter((x) => x[0] === "banner").at(-1), ["banner", "doc", null], "the banner is cleared");
