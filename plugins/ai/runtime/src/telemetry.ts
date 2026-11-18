@@ -23,6 +23,9 @@ export const COUNTERS = [
   "tag_groups_created",
   "tag_groups_joined",
   "signin_started",
+  "tool_refused_stopped",
+  "tool_refused_ended",
+  "tool_refused_unknown",
 ] as const;
 
 export type Counter = (typeof COUNTERS)[number];

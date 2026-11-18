@@ -10,6 +10,7 @@ import * as Tools from "./browserTools.ts";
 import { ardiaHost } from "./host.ts";
 import { channelHost } from "./hostApi.ts";
 import { countUse, pluginState } from "./state.ts";
+import { type TurnRefusal, turnLedger } from "./turnLedger.ts";
 
 const TabId = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)).annotate({ description: "A tab id from ardia_chat_context or ardia_list_tabs." });
 const Ref = Schema.String.check(Schema.isMinLength(2), Schema.isMaxLength(200)).annotate({ description: "An element ref from ardia_read_tab, such as @e12, or a CSS selector." });
@@ -96,9 +97,16 @@ const FAILURE_CODES: Record<string, OrchestratorMcpFailure["code"]> = {
   refused: "capability_denied",
   denied: "capability_denied",
   stopped: "capability_denied",
+  ended: "capability_denied",
   in_split: "invalid_request",
   not_in_split: "invalid_request",
   no_chat_tab: "invalid_request",
+};
+
+const REFUSALS: Record<TurnRefusal, string> = {
+  stopped: Tools.STOPPED_MESSAGE,
+  ended: Tools.ENDED_MESSAGE,
+  unknown: "Ardia doesn't know which turn this call belongs to, so it can't use tabs.",
 };
 
 const failure = (error: unknown) =>
@@ -115,12 +123,19 @@ const run = <A>(body: (ctx: Tools.ToolContext, chatId: string) => Promise<A>) =>
     if (!chatId) return yield* new OrchestratorMcpFailure({ code: "thread_credential_required", message: "Only a chat can use Ardia's tabs." });
     if (!host || host.channel.isClosed) return yield* new OrchestratorMcpFailure({ code: "orchestration_error", message: "Ardia isn't connected." });
     const state = pluginState(host.dataDir);
-    const run = state.runs.token(chatId);
-    if (run.signal.aborted) return yield* new OrchestratorMcpFailure({ code: "capability_denied", message: "The person stopped you. Don't use tabs again until they send a new message." });
+    const found = turnLedger.lookup(chatId);
+    if (!found.ok) {
+      state.telemetry.count(`tool_refused_${found.refusal}`);
+      return yield* new OrchestratorMcpFailure({ code: "capability_denied", message: REFUSALS[found.refusal] });
+    }
+    const turn = found.turn;
     return yield* Effect.tryPromise({
       try: (signal) =>
-        body({ host: channelHost(host.channel), asks: state.asks, memory: state.memory, grants: state.grants, onUse: (use) => countUse(state, use), onBanner: (tab, chat) => void (chat ? state.banners.set(tab, chat) : state.banners.delete(tab)), signal: AbortSignal.any([signal, run.signal]), run }, chatId),
-      catch: failure,
+        body({ host: channelHost(host.channel), asks: state.asks, memory: state.memory, grants: state.grants, onUse: (use) => countUse(state, use), onBanner: (tab, chat) => void (chat ? state.banners.set(tab, chat) : state.banners.delete(tab)), signal: AbortSignal.any([signal, turn.signal]), turn }, chatId),
+      catch: (error) => {
+        if (error instanceof Tools.ToolFailure && (error.code === "stopped" || error.code === "ended")) state.telemetry.count(`tool_refused_${error.code}`);
+        return failure(error);
+      },
     });
   });
 

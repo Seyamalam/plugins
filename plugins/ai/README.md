@@ -109,6 +109,8 @@ Code at the pinned commit (or uses the tree given), runs `runtime/apply.sh` (pat
 Counts only, through the host's `telemetry.count`, sent only while sharing is on: `chats_started`,
 `mode_browser_first`, `mode_ai_first`, `tool_read`, `tool_act`, `tool_open`, `tool_close`, `tool_group`,
 `tool_split_to_group`, `permission_allowed`, `permission_always`, `permission_denied`, `permission_timed_out`,
-`runtime_crashes`, `banner_stops`, `tag_groups_created`, `tag_groups_joined`, `signin_started`. Never prompts, page
+`runtime_crashes`, `banner_stops`, `tag_groups_created`, `tag_groups_joined`, `signin_started`, `tool_refused_stopped`,
+`tool_refused_ended`, `tool_refused_unknown`. Never prompts, page
 content, URLs or titles. Dashboard: watch `permission_denied` against `permission_allowed` (asks that annoy),
-`runtime_crashes` against `chats_started`, and `tool_split_to_group` against splits that got a tab opened.
+`runtime_crashes` against `chats_started`, and `tool_split_to_group` against splits that got a tab opened. `tool_refused_stopped` should follow `banner_stops`
+and Stop presses; `tool_refused_unknown` should stay near zero (a tool call T3 couldn't place in a turn).

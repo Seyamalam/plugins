@@ -11,6 +11,7 @@ import { selfTurns } from "./selfClient.ts";
 import { ardiaHost, type ArdiaHostHandle } from "./host.ts";
 import { channelHost } from "./hostApi.ts";
 import { notifyChat, pluginState } from "./state.ts";
+import { turnLedger } from "./turnLedger.ts";
 
 const verified = new Map<string, number>();
 const VERIFY_TTL_MS = 60_000;
@@ -74,7 +75,7 @@ function depsFor(handle: ArdiaHostHandle): ApiDeps {
         const tab = String(event.data.tab ?? "");
         const chatId = state.banners.get(tab);
         if (chatId) {
-          stopChat({ state, turns: turnsFor(handle) }, chatId);
+          stopChat({ state, turns: turnsFor(handle), ledger: turnLedger }, chatId);
           notifyChat(state, chatId, "stopped");
           state.telemetry.count("banner_stops");
         }
@@ -85,6 +86,7 @@ function depsFor(handle: ArdiaHostHandle): ApiDeps {
   return {
     host: channelHost(handle.channel),
     turns: turnsFor(handle),
+    ledger: turnLedger,
     state,
     values: () => handle.values,
     appVersion: handle.appVersion,

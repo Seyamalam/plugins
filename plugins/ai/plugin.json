@@ -79,6 +79,6 @@
     ]
   },
   "hooks": ["tab.closed"],
-  "telemetry": { "counters": ["chats_started", "mode_browser_first", "mode_ai_first", "tool_read", "tool_act", "tool_open", "tool_close", "tool_group", "tool_split_to_group", "permission_allowed", "permission_always", "permission_denied", "permission_timed_out", "runtime_crashes", "banner_stops", "tag_groups_created", "tag_groups_joined", "signin_started"] },
+  "telemetry": { "counters": ["chats_started", "mode_browser_first", "mode_ai_first", "tool_read", "tool_act", "tool_open", "tool_close", "tool_group", "tool_split_to_group", "permission_allowed", "permission_always", "permission_denied", "permission_timed_out", "runtime_crashes", "banner_stops", "tag_groups_created", "tag_groups_joined", "signin_started", "tool_refused_stopped", "tool_refused_ended", "tool_refused_unknown"] },
   "tools": [{ "name": "new-chat", "title": "New chat", "description": "Opens a new AI chat tab, beside the current tab with split.", "timeout": 15 }]
 }

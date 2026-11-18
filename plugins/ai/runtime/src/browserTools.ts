@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off extendsNativeError:off effectFnOpportunity:off globalFetch:off
-import type { RunToken } from "./runs.ts";
+import type { TurnToken } from "./turnLedger.ts";
 import { Asks, type AskKind } from "./asks.ts";
 import { addGrant, decide, decideOpen, grantFor, type Decision, type Grant, type ToolKind } from "./permissions.ts";
 import { factsFor, flattenWorkspace, placeOfChat, summarize, type ChatPlace, type FlatTab, type Workspace } from "./tabs.ts";
@@ -24,7 +24,6 @@ export type ChatMemoryStore = {
   noteOpened(chatId: string, tabId: string, origin: string | null): void;
   hasReadPages(chatId: string): boolean;
   noteReadPages(chatId: string): void;
-  stopped(chatId: string): boolean;
 };
 
 export type GrantStore = { list(): Grant[]; save(grants: Grant[]): void };
@@ -39,7 +38,7 @@ export type ToolContext = {
   onUse?: (use: ToolUse) => void;
   onBanner?: (tabId: string, chatId: string | null) => void;
   signal?: AbortSignal;
-  run?: RunToken;
+  turn: TurnToken;
 };
 
 export class ToolFailure extends Error {
@@ -69,12 +68,20 @@ function titleOf(tab: FlatTab | undefined) {
   return tab ? tab.customTitle || tab.title || tab.url : "a tab";
 }
 
-function stoppedGuard(ctx: ToolContext, chatId: string) {
-  if (ctx.run ? ctx.run.signal.aborted : ctx.memory.stopped(chatId)) throw new ToolFailure("stopped", "The person stopped you. Don't use tabs again until they send a new message.");
+export const STOPPED_MESSAGE = "The person stopped you. Don't use tabs again until they send a new message.";
+export const ENDED_MESSAGE = "That turn has ended. Use tabs only in the turn that's running.";
+
+export function turnFailure(signal: AbortSignal): ToolFailure {
+  const ended = signal.reason instanceof Error && signal.reason.message === "ended";
+  return ended ? new ToolFailure("ended", ENDED_MESSAGE) : new ToolFailure("stopped", STOPPED_MESSAGE);
+}
+
+function turnGuard(ctx: ToolContext) {
+  if (ctx.turn.signal.aborted) throw turnFailure(ctx.turn.signal);
 }
 
 async function permit(ctx: ToolContext, chatId: string, tool: string, kind: ToolKind, tab: FlatTab | undefined, snap: Snapshot, detail: string | null, preset?: Decision): Promise<void> {
-  stoppedGuard(ctx, chatId);
+  turnGuard(ctx);
   const decision: Decision = preset ?? decide(kind, factsFor(tab, snap.place, memoryOf(ctx, chatId)), ctx.grants.list());
   if (decision.outcome === "allow") {
     ctx.onUse?.({ tool, kind, outcome: "allowed" });
@@ -129,7 +136,7 @@ export async function chatContext(ctx: ToolContext, chatId: string) {
 }
 
 export async function listTabs(ctx: ToolContext, chatId: string) {
-  stoppedGuard(ctx, chatId);
+  turnGuard(ctx);
   const snap = await snapshot(ctx, chatId);
   ctx.onUse?.({ tool: "list_tabs", kind: "list", outcome: "allowed" });
   return { tabs: summarize(snap.tabs, snap.place, memoryOf(ctx, chatId)) };
@@ -147,12 +154,12 @@ async function withBanner<T>(ctx: ToolContext, chatId: string, tabId: string, ru
 }
 
 async function browseOrFail(ctx: ToolContext, chatId: string, tabId: string, argv: string[]): Promise<string> {
-  stoppedGuard(ctx, chatId);
-  const result = await ctx.host.browse(tabId, argv, ctx.run?.signal).catch((error: unknown) => {
-    if (ctx.run?.signal.aborted) throw new ToolFailure("stopped", "The person stopped you. Don't use tabs again until they send a new message.");
+  turnGuard(ctx);
+  const result = await ctx.host.browse(tabId, argv, ctx.turn.signal).catch((error: unknown) => {
+    if (ctx.turn.signal.aborted) throw turnFailure(ctx.turn.signal);
     throw error;
   });
-  stoppedGuard(ctx, chatId);
+  turnGuard(ctx);
   if (!result.ok) throw new ToolFailure("browse_failed", result.error ?? "Ardia couldn't do that on the page.");
   return result.text ?? "";
 }
@@ -191,7 +198,7 @@ export async function type(ctx: ToolContext, chatId: string, tabId: string, ref:
 }
 
 export async function openTab(ctx: ToolContext, chatId: string, url: string, group: "chat" | "none", activate: boolean) {
-  stoppedGuard(ctx, chatId);
+  turnGuard(ctx);
   const decision = decideOpen(url, ctx.memory.hasReadPages(chatId));
   if (decision.outcome === "refuse") {
     ctx.onUse?.({ tool: "open_tab", kind: "open", outcome: "refused" });
@@ -245,7 +252,7 @@ export async function addToChatGroup(ctx: ToolContext, chatId: string, tabIds: s
 }
 
 export async function splitToGroup(ctx: ToolContext, chatId: string) {
-  stoppedGuard(ctx, chatId);
+  turnGuard(ctx);
   const snap = await snapshot(ctx, chatId);
   const chatTab = snap.place.chatTab;
   if (!chatTab) throw new ToolFailure("no_chat_tab", "This chat isn't open in a tab.");

@@ -1,5 +1,4 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off extendsNativeError:off effectFnOpportunity:off globalFetch:off
-import { Runs } from "./runs.ts";
 import * as Fs from "node:fs";
 import * as Path from "node:path";
 import { Asks } from "./asks.ts";
@@ -44,19 +43,21 @@ export type ChatMemory = ChatMemoryStore & {
   tag(chatId: string, tabIds: readonly string[]): void;
   untag(chatId: string, tabId: string): void;
   forgetTab(tabId: string): void;
-  stop(chatId: string): void;
-  resume(chatId: string): void;
+  stopped(chatId: string): boolean;
+  noteStopped(chatId: string): void;
+  noteSent(chatId: string): void;
   startOnce(chatId: string): boolean;
 };
 
 const ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 
-export function fileChatMemory(dataDir: string, runs: Runs = new Runs()): ChatMemory {
+export function fileChatMemory(dataDir: string): ChatMemory {
   const file = Path.join(dataDir, "chats.json");
   const opened = new Map<string, Map<string, string | null>>();
   const readPages = new Set<string>();
   const tagged = new Map<string, Set<string>>();
   const started = new Set<string>();
+  const stopped = new Set<string>();
   const saved = readJson(file)?.chats;
   if (saved && typeof saved === "object") {
     for (const [chatId, entry] of Object.entries(saved as Record<string, { opened?: unknown; tagged?: unknown; readPages?: unknown }>)) {
@@ -114,9 +115,9 @@ export function fileChatMemory(dataDir: string, runs: Runs = new Runs()): ChatMe
       for (const set of tagged.values()) set.delete(tabId);
       persist();
     },
-    stopped: (chatId) => runs.stopped(chatId),
-    stop: (chatId) => runs.stop(chatId),
-    resume: (chatId) => void runs.begin(chatId),
+    stopped: (chatId) => stopped.has(chatId),
+    noteStopped: (chatId) => void stopped.add(chatId),
+    noteSent: (chatId) => void stopped.delete(chatId),
     startOnce: (chatId) => {
       if (started.has(chatId)) return false;
       started.add(chatId);
@@ -132,7 +133,6 @@ export type PluginState = {
   asks: Asks;
   grants: GrantStore;
   memory: ChatMemory;
-  runs: Runs;
   counts: UsageCounts;
   telemetry: Telemetry;
   banners: Map<string, string>;
@@ -143,8 +143,7 @@ let state: PluginState | null = null;
 
 export function pluginState(dataDir: string): PluginState {
   if (!state) {
-    const runs = new Runs();
-    state = { asks: new Asks(), grants: fileGrantStore(dataDir), memory: fileChatMemory(dataDir, runs), runs, counts: {}, telemetry: new Telemetry(null), banners: new Map(), notes: new Set() };
+    state = { asks: new Asks(), grants: fileGrantStore(dataDir), memory: fileChatMemory(dataDir), counts: {}, telemetry: new Telemetry(null), banners: new Map(), notes: new Set() };
   }
   return state;
 }

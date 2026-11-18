@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Asks } from "../runtime/src/asks.ts";
 import * as Tools from "../runtime/src/browserTools.ts";
+import { TurnLedger } from "../runtime/src/turnLedger.ts";
 
 const CHAT = "0b9e6c1e-2f4a-4c55-9d7e-1a2b3c4d5e6f";
 
@@ -36,8 +37,17 @@ function world({ split = false, grouped = false } = {}) {
   return host;
 }
 
+function liveTurn(stopped = false) {
+  const ledger = new TurnLedger();
+  ledger.launched(CHAT, "r1", "p#1");
+  if (stopped) ledger.stop(CHAT);
+  const found = ledger.lookup(CHAT);
+  return { ledger, turn: found.ok ? found.turn : { runId: "r1", signal: AbortSignal.abort(new Error("stopped")) } };
+}
+
 function context(host, { answer = null, stopped = false, grants = [] } = {}) {
   const asks = new Asks(1000);
+  const { ledger, turn } = liveTurn(stopped);
   const opened = new Map();
   const read = new Set();
   const uses = [];
@@ -49,10 +59,12 @@ function context(host, { answer = null, stopped = false, grants = [] } = {}) {
     asks,
     uses,
     read,
+    ledger,
     ctx: {
+      turn,
       host,
       asks,
-      memory: { opened: () => opened, tagged: () => new Set(), noteOpened: (_c, id, origin) => opened.set(id, origin), hasReadPages: (c) => read.has(c), noteReadPages: (c) => read.add(c), stopped: () => stopped },
+      memory: { opened: () => opened, tagged: () => new Set(), noteOpened: (_c, id, origin) => opened.set(id, origin), hasReadPages: (c) => read.has(c), noteReadPages: (c) => read.add(c) },
       grants: { list: () => saved, save: (g) => (saved = g) },
       onUse: (u) => uses.push(u),
     },
@@ -188,12 +200,10 @@ test("Always on a close or regroup ask grants nothing", async () => {
 test("Stop pressed while a form is being filled keeps the submit from happening", async () => {
   const host = world({ grouped: true });
   const c = context(host, { answer: "allow" });
-  let stopped = false;
-  c.ctx.memory.stopped = () => stopped;
   const browse = host.browse;
   host.browse = async (tabId, argv) => {
     const result = await browse(tabId, argv);
-    if (argv[0] === "fill") stopped = true;
+    if (argv[0] === "fill") c.ledger.stop(CHAT);
     return result;
   };
   await assert.rejects(Tools.type(c.ctx, CHAT, "doc", "@e2", "hello", true), (e) => e.code === "stopped");
@@ -202,7 +212,6 @@ test("Stop pressed while a form is being filled keeps the submit from happening"
   assert.deepEqual(host.calls.filter((x) => x[0] === "banner").at(-1), ["banner", "doc", null], "the banner is cleared");
 });
 
-const { Runs } = await import("../runtime/src/runs.ts");
 
 function deferredHost(host) {
   const gates = [];
@@ -217,27 +226,25 @@ function deferredHost(host) {
 test("Stop during a type-with-submit's fill, then a new message before the fill returns: no Enter ever reaches the page", async () => {
   const host = world({ grouped: true });
   const c = context(host, { answer: "allow" });
-  const runs = new Runs();
-  c.ctx.run = runs.token(CHAT);
   const gate = deferredHost(host);
   const typing = Tools.type(c.ctx, CHAT, "doc", "@e2", "hello", true);
   await new Promise((r) => setTimeout(r, 5));
-  runs.stop(CHAT);
-  runs.begin(CHAT);
+  c.ledger.stop(CHAT);
+  c.ledger.ended("p#1");
+  c.ledger.launched(CHAT, "r2", "p#2");
   await gate.release();
   await assert.rejects(typing, (e) => e.code === "stopped");
   assert.ok(!host.calls.some((x) => x[0] === "browse" && x[2] === "press"), "Enter never reaches the page");
-  assert.notEqual(runs.token(CHAT).signal.aborted, true, "the new message's run is live");
+  assert.equal(c.ledger.lookup(CHAT).ok, true, "the new message's turn is live");
 });
 
-test("a click chain from a stopped run can't take its next step after a new message starts another run", async () => {
+test("a click chain from a stopped turn can't take its next step after a new message starts another turn", async () => {
   const host = world({ grouped: true });
   const c = context(host, { answer: "allow" });
-  const runs = new Runs();
-  c.ctx.run = runs.token(CHAT);
   await Tools.click(c.ctx, CHAT, "doc", "@e1");
-  runs.stop(CHAT);
-  runs.begin(CHAT);
+  c.ledger.stop(CHAT);
+  c.ledger.ended("p#1");
+  c.ledger.launched(CHAT, "r2", "p#2");
   await assert.rejects(Tools.click(c.ctx, CHAT, "doc", "@e2"), (e) => e.code === "stopped");
   assert.deepEqual(host.calls.filter((x) => x[0] === "browse").map((x) => x[3]), ["@e1"], "only the click before Stop happened");
   assert.deepEqual(host.calls.filter((x) => x[0] === "banner").at(-1), ["banner", "doc", null], "the banner is cleared");

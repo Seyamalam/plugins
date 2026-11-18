@@ -5,6 +5,7 @@ import type { PluginValues } from "./host.ts";
 import type { PluginState } from "./state.ts";
 import type { Counter } from "./telemetry.ts";
 import { flattenWorkspace, placeOfChat, summarize } from "./tabs.ts";
+import type { TurnLedger } from "./turnLedger.ts";
 
 export type ApiReply = { status: number; body: unknown };
 
@@ -19,23 +20,19 @@ export type ApiDeps = {
   startLogin: (provider: "claude" | "codex") => Promise<void>;
   count: (counter: Counter) => void;
   turns?: TurnControl;
+  ledger: Pick<TurnLedger, "stop">;
 };
 
 export type TurnControl = {
   stop(chatId: string): Promise<void>;
-  ended(chatId: string): Promise<void>;
 };
 
-export function stopChat(deps: Pick<ApiDeps, "state" | "turns">, chatId: string) {
-  deps.state.runs.stop(chatId);
+export function stopChat(deps: Pick<ApiDeps, "state" | "turns" | "ledger">, chatId: string) {
+  deps.ledger.stop(chatId);
+  deps.state.memory.noteStopped(chatId);
   deps.state.asks.cancelChat(chatId);
   bumpChat(chatId);
   void deps.turns?.stop(chatId).catch(() => undefined);
-}
-
-async function beginRun(deps: Pick<ApiDeps, "state" | "turns">, chatId: string) {
-  if (deps.state.runs.stopped(chatId)) await deps.turns?.ended(chatId).catch(() => undefined);
-  deps.state.runs.begin(chatId);
 }
 
 const CHAT_ID = /^[A-Za-z0-9-]{8,64}$/;
@@ -139,7 +136,7 @@ export async function handleApi(method: string, path: string, query: URLSearchPa
       if (!chat) return bad("Needs a chat.");
       const tabs = tabList(input.tabs ?? []);
       if (!tabs) return bad("tabs must be a list of up to 20 tab ids.");
-      await beginRun(deps, chat);
+      deps.state.memory.noteSent(chat);
       if (deps.state.memory.startOnce(chat)) deps.count("chats_started");
       bumpChat(chat);
       return ok(await tag(deps, chat, tabs));
@@ -151,7 +148,7 @@ export async function handleApi(method: string, path: string, query: URLSearchPa
     }
     case "POST /ardia/open": {
       const target = str(input.path, 700);
-      if (!target || !/^(new|history|[A-Za-z0-9-]{8,64})(\?[A-Za-z0-9=&%._~+-]{0,600})?$/.test(target)) return bad("Bad path.");
+      if (!target || !/^(new|history|[A-Za-z0-9-]{8,64})(\?[A-Za-z0-9=&%._~+-]{0,602})?$/.test(target)) return bad("Bad path.");
       const split = input.split === true;
       return ok(await deps.openPage(target, { split, side: typeof input.side === "string" ? input.side : undefined }));
     }
