@@ -184,3 +184,20 @@ test("Always on a close or regroup ask grants nothing", async () => {
   await Tools.closeTab(c.ctx, CHAT, "bank");
   assert.deepEqual(c.savedGrants(), []);
 });
+
+test("Stop pressed while a form is being filled keeps the submit from happening", async () => {
+  const host = world({ grouped: true });
+  const c = context(host, { answer: "allow" });
+  let stopped = false;
+  c.ctx.memory.stopped = () => stopped;
+  const browse = host.browse;
+  host.browse = async (tabId, argv) => {
+    const result = await browse(tabId, argv);
+    if (argv[0] === "fill") stopped = true;
+    return result;
+  };
+  await assert.rejects(Tools.type(c.ctx, CHAT, "doc", "@e2", "hello", true), (e) => e.code === "stopped");
+  const actions = host.calls.filter((x) => x[0] === "browse").map((x) => x[2]);
+  assert.deepEqual(actions, ["fill"], "Enter is never pressed after Stop");
+  assert.deepEqual(host.calls.filter((x) => x[0] === "banner").at(-1), ["banner", "doc", null], "the banner is cleared");
+});

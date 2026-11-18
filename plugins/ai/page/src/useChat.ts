@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Ask } from "./api";
-import { activeRun, applyStream, emptyChat, type Chat, type StreamItem } from "./chatState";
+import { applyStream, emptyChat, type Chat, type StreamItem } from "./chatState";
+import { bannerStopper } from "./bannerStop";
 import { withTags, type ModelOption, type TagRef } from "./models";
 import { useSession } from "./session";
 
@@ -14,7 +15,6 @@ export function useChat(chatId: string) {
   const [asks, setAsks] = useState<Ask[]>([]);
   const [sendError, setSendError] = useState<string | null>(null);
   const [subscribed, setSubscribed] = useState(0);
-  const stopped = useRef(false);
 
   useEffect(() => {
     if (!connection) return;
@@ -43,21 +43,19 @@ export function useChat(chatId: string) {
 
   useEffect(() => {
     if (!api) return;
+    const onStopped = bannerStopper((reason) => {
+      if (connection) void connection.call((c) => c["orchestration.dispatchCommand"]({ type: "thread.stop", commandId: uuid(), threadId: chatId, reason } as never)).catch(() => undefined);
+    });
     return api.watch(
       chatId,
       (events) => {
         setAsks(events.asks);
         session.setValues(events.values);
-        if (events.stopped && !stopped.current) {
-          stopped.current = true;
-          const run = activeRun(chat);
-          if (run && connection) void connection.call((c) => c["orchestration.dispatchCommand"]({ type: "thread.stop", commandId: uuid(), threadId: chatId, reason: "Stopped from the tab" } as never)).catch(() => undefined);
-        }
-        if (!events.stopped) stopped.current = false;
+        onStopped(events.stopped);
       },
       () => undefined,
     );
-  }, [api, chatId]);
+  }, [api, connection, chatId]);
 
   const send = useCallback(
     async (text: string, tags: TagRef[], model: ModelOption) => {

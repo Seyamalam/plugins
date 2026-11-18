@@ -144,7 +144,8 @@ async function withBanner<T>(ctx: ToolContext, chatId: string, tabId: string, ru
   }
 }
 
-async function browseOrFail(ctx: ToolContext, tabId: string, argv: string[]): Promise<string> {
+async function browseOrFail(ctx: ToolContext, chatId: string, tabId: string, argv: string[]): Promise<string> {
+  stoppedGuard(ctx, chatId);
   const result = await ctx.host.browse(tabId, argv);
   if (!result.ok) throw new ToolFailure("browse_failed", result.error ?? "Ardia couldn't do that on the page.");
   return result.text ?? "";
@@ -155,7 +156,7 @@ export async function readTab(ctx: ToolContext, chatId: string, tabId: string) {
   const tab = findTab(snap, tabId);
   await permit(ctx, chatId, "read_tab", "read", tab, snap, null);
   await stillSamePage(ctx, chatId, tab!);
-  const text = await browseOrFail(ctx, tab!.id, ["snapshot", "-i", "-c"]);
+  const text = await browseOrFail(ctx, chatId, tab!.id, ["snapshot", "-i", "-c"]);
   ctx.memory.noteReadPages(chatId);
   return { tab: tab!.id, title: titleOf(tab), url: tab!.url, content: untrusted(tab!, text) };
 }
@@ -166,7 +167,7 @@ export async function click(ctx: ToolContext, chatId: string, tabId: string, ref
   await permit(ctx, chatId, "click", "act", tab, snap, `Click ${ref}`);
   await stillSamePage(ctx, chatId, tab!);
   ctx.memory.noteReadPages(chatId);
-  const text = await withBanner(ctx, chatId, tab!.id, () => browseOrFail(ctx, tab!.id, ["click", ref]));
+  const text = await withBanner(ctx, chatId, tab!.id, () => browseOrFail(ctx, chatId, tab!.id, ["click", ref]));
   return { tab: tab!.id, result: clip(text) };
 }
 
@@ -177,8 +178,8 @@ export async function type(ctx: ToolContext, chatId: string, tabId: string, ref:
   await stillSamePage(ctx, chatId, tab!);
   ctx.memory.noteReadPages(chatId);
   const out = await withBanner(ctx, chatId, tab!.id, async () => {
-    const filled = await browseOrFail(ctx, tab!.id, ["fill", ref, text]);
-    return submit ? `${filled}\n${await browseOrFail(ctx, tab!.id, ["press", "Enter"])}` : filled;
+    const filled = await browseOrFail(ctx, chatId, tab!.id, ["fill", ref, text]);
+    return submit ? `${filled}\n${await browseOrFail(ctx, chatId, tab!.id, ["press", "Enter"])}` : filled;
   });
   return { tab: tab!.id, result: clip(out) };
 }
