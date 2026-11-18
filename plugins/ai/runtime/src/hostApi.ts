@@ -13,7 +13,7 @@ export function channelHost(channel: Channel): HostApi {
   };
   return {
     workspace: () => channel.request<Workspace>("workspace", {}),
-    browse: (tab, argv) => channel.request<BrowseResult>("browse", { tab, argv }, 90_000),
+    browse: (tab, argv, signal) => channel.request<BrowseResult>("browse", { tab, argv }, 90_000, signal),
     openTab: async (url, place) => {
       const op: Record<string, unknown> = { op: "open", urls: [url], window: place.windowId, activate: place.activate };
       if (place.group) op.group = place.group;

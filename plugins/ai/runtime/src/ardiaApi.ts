@@ -18,7 +18,25 @@ export type ApiDeps = {
   setValue: (key: string, value: string | boolean) => Promise<void>;
   startLogin: (provider: "claude" | "codex") => Promise<void>;
   count: (counter: Counter) => void;
+  turns?: TurnControl;
 };
+
+export type TurnControl = {
+  stop(chatId: string): Promise<void>;
+  ended(chatId: string): Promise<void>;
+};
+
+export function stopChat(deps: Pick<ApiDeps, "state" | "turns">, chatId: string) {
+  deps.state.runs.stop(chatId);
+  deps.state.asks.cancelChat(chatId);
+  bumpChat(chatId);
+  void deps.turns?.stop(chatId).catch(() => undefined);
+}
+
+async function beginRun(deps: Pick<ApiDeps, "state" | "turns">, chatId: string) {
+  if (deps.state.runs.stopped(chatId)) await deps.turns?.ended(chatId).catch(() => undefined);
+  deps.state.runs.begin(chatId);
+}
 
 const CHAT_ID = /^[A-Za-z0-9-]{8,64}$/;
 const TAB_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -121,20 +139,18 @@ export async function handleApi(method: string, path: string, query: URLSearchPa
       if (!chat) return bad("Needs a chat.");
       const tabs = tabList(input.tabs ?? []);
       if (!tabs) return bad("tabs must be a list of up to 20 tab ids.");
-      deps.state.memory.resume(chat);
+      await beginRun(deps, chat);
       if (deps.state.memory.startOnce(chat)) deps.count("chats_started");
       bumpChat(chat);
       return ok(await tag(deps, chat, tabs));
     }
     case "POST /ardia/stop": {
       if (!chat) return bad("Needs a chat.");
-      deps.state.memory.stop(chat);
-      deps.state.asks.cancelChat(chat);
-      bumpChat(chat);
+      stopChat(deps, chat);
       return ok({ ok: true });
     }
     case "POST /ardia/open": {
-      const target = str(input.path, 100);
+      const target = str(input.path, 700);
       if (!target || !/^(new|history|[A-Za-z0-9-]{8,64})(\?[A-Za-z0-9=&%._~+-]{0,600})?$/.test(target)) return bad("Bad path.");
       const split = input.split === true;
       return ok(await deps.openPage(target, { split, side: typeof input.side === "string" ? input.side : undefined }));

@@ -6,7 +6,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
-import { bumpChat, handleApi, type ApiDeps } from "./ardiaApi.ts";
+import { bumpChat, handleApi, stopChat, type ApiDeps } from "./ardiaApi.ts";
+import { selfTurns } from "./selfClient.ts";
 import { ardiaHost, type ArdiaHostHandle } from "./host.ts";
 import { channelHost } from "./hostApi.ts";
 import { notifyChat, pluginState } from "./state.ts";
@@ -58,6 +59,9 @@ async function startLogin(handle: ArdiaHostHandle, provider: "claude" | "codex")
 }
 
 let wired = false;
+let turns: ApiDeps["turns"] | null = null;
+
+const turnsFor = (handle: ArdiaHostHandle) => (turns ??= selfTurns(handle.port, handle.selfToken));
 
 function depsFor(handle: ArdiaHostHandle): ApiDeps {
   const state = pluginState(handle.dataDir);
@@ -70,9 +74,7 @@ function depsFor(handle: ArdiaHostHandle): ApiDeps {
         const tab = String(event.data.tab ?? "");
         const chatId = state.banners.get(tab);
         if (chatId) {
-          state.memory.stop(chatId);
-          state.asks.cancelChat(chatId);
-          bumpChat(chatId);
+          stopChat({ state, turns: turnsFor(handle) }, chatId);
           notifyChat(state, chatId, "stopped");
           state.telemetry.count("banner_stops");
         }
@@ -82,6 +84,7 @@ function depsFor(handle: ArdiaHostHandle): ApiDeps {
   }
   return {
     host: channelHost(handle.channel),
+    turns: turnsFor(handle),
     state,
     values: () => handle.values,
     appVersion: handle.appVersion,

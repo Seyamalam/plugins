@@ -115,9 +115,11 @@ const run = <A>(body: (ctx: Tools.ToolContext, chatId: string) => Promise<A>) =>
     if (!chatId) return yield* new OrchestratorMcpFailure({ code: "thread_credential_required", message: "Only a chat can use Ardia's tabs." });
     if (!host || host.channel.isClosed) return yield* new OrchestratorMcpFailure({ code: "orchestration_error", message: "Ardia isn't connected." });
     const state = pluginState(host.dataDir);
+    const run = state.runs.token(chatId);
+    if (run.signal.aborted) return yield* new OrchestratorMcpFailure({ code: "capability_denied", message: "The person stopped you. Don't use tabs again until they send a new message." });
     return yield* Effect.tryPromise({
       try: (signal) =>
-        body({ host: channelHost(host.channel), asks: state.asks, memory: state.memory, grants: state.grants, onUse: (use) => countUse(state, use), onBanner: (tab, chat) => void (chat ? state.banners.set(tab, chat) : state.banners.delete(tab)), signal }, chatId),
+        body({ host: channelHost(host.channel), asks: state.asks, memory: state.memory, grants: state.grants, onUse: (use) => countUse(state, use), onBanner: (tab, chat) => void (chat ? state.banners.set(tab, chat) : state.banners.delete(tab)), signal: AbortSignal.any([signal, run.signal]), run }, chatId),
       catch: failure,
     });
   });

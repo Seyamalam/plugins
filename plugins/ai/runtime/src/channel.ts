@@ -70,15 +70,35 @@ export class Channel {
     return this.closed;
   }
 
-  request<T = unknown>(method: string, params: Record<string, unknown> = {}, timeoutMs = this.timeoutMs): Promise<T> {
+  request<T = unknown>(method: string, params: Record<string, unknown> = {}, timeoutMs = this.timeoutMs, signal?: AbortSignal): Promise<T> {
     if (this.closed) return Promise.reject(new ChannelRequestError({ code: "closed", message: "Ardia's channel is closed." }));
+    if (signal?.aborted) return Promise.reject(new ChannelRequestError({ code: "aborted", message: `${method} was cancelled before it was sent.` }));
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
+      const abort = () => {
+        const waiting = this.pending.get(id);
+        if (!waiting) return;
+        clearTimeout(waiting.timer);
+        this.pending.delete(id);
+        reject(new ChannelRequestError({ code: "aborted", message: `${method} was cancelled.` }));
+      };
       const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", abort);
         this.pending.delete(id);
         reject(new ChannelRequestError({ code: "timeout", message: `Ardia didn't answer ${method} in time.` }));
       }, timeoutMs);
-      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
+      signal?.addEventListener("abort", abort, { once: true });
+      this.pending.set(id, {
+        resolve: (value: unknown) => {
+          signal?.removeEventListener("abort", abort);
+          (resolve as (value: unknown) => void)(value);
+        },
+        reject: (error: unknown) => {
+          signal?.removeEventListener("abort", abort);
+          reject(error);
+        },
+        timer,
+      });
       this.transport.write(JSON.stringify({ id, method, params }));
     });
   }

@@ -201,3 +201,44 @@ test("Stop pressed while a form is being filled keeps the submit from happening"
   assert.deepEqual(actions, ["fill"], "Enter is never pressed after Stop");
   assert.deepEqual(host.calls.filter((x) => x[0] === "banner").at(-1), ["banner", "doc", null], "the banner is cleared");
 });
+
+const { Runs } = await import("../runtime/src/runs.ts");
+
+function deferredHost(host) {
+  const gates = [];
+  const browse = host.browse;
+  host.browse = (tabId, argv, signal) => new Promise((resolve, reject) => {
+    gates.push(() => browse(tabId, argv).then(resolve, reject));
+    signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+  });
+  return { release: async () => { while (gates.length) await gates.shift()(); } };
+}
+
+test("Stop during a type-with-submit's fill, then a new message before the fill returns: no Enter ever reaches the page", async () => {
+  const host = world({ grouped: true });
+  const c = context(host, { answer: "allow" });
+  const runs = new Runs();
+  c.ctx.run = runs.token(CHAT);
+  const gate = deferredHost(host);
+  const typing = Tools.type(c.ctx, CHAT, "doc", "@e2", "hello", true);
+  await new Promise((r) => setTimeout(r, 5));
+  runs.stop(CHAT);
+  runs.begin(CHAT);
+  await gate.release();
+  await assert.rejects(typing, (e) => e.code === "stopped");
+  assert.ok(!host.calls.some((x) => x[0] === "browse" && x[2] === "press"), "Enter never reaches the page");
+  assert.notEqual(runs.token(CHAT).signal.aborted, true, "the new message's run is live");
+});
+
+test("a click chain from a stopped run can't take its next step after a new message starts another run", async () => {
+  const host = world({ grouped: true });
+  const c = context(host, { answer: "allow" });
+  const runs = new Runs();
+  c.ctx.run = runs.token(CHAT);
+  await Tools.click(c.ctx, CHAT, "doc", "@e1");
+  runs.stop(CHAT);
+  runs.begin(CHAT);
+  await assert.rejects(Tools.click(c.ctx, CHAT, "doc", "@e2"), (e) => e.code === "stopped");
+  assert.deepEqual(host.calls.filter((x) => x[0] === "browse").map((x) => x[3]), ["@e1"], "only the click before Stop happened");
+  assert.deepEqual(host.calls.filter((x) => x[0] === "banner").at(-1), ["banner", "doc", null], "the banner is cleared");
+});

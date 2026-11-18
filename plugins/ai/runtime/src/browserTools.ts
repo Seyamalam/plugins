@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off extendsNativeError:off effectFnOpportunity:off globalFetch:off
+import type { RunToken } from "./runs.ts";
 import { Asks, type AskKind } from "./asks.ts";
 import { addGrant, decide, decideOpen, grantFor, type Decision, type Grant, type ToolKind } from "./permissions.ts";
 import { factsFor, flattenWorkspace, placeOfChat, summarize, type ChatPlace, type FlatTab, type Workspace } from "./tabs.ts";
@@ -8,7 +9,7 @@ export type BrowseResult = { ok: boolean; text?: string; error?: string };
 
 export type HostApi = {
   workspace(): Promise<Workspace>;
-  browse(tabId: string, argv: string[]): Promise<BrowseResult>;
+  browse(tabId: string, argv: string[], signal?: AbortSignal): Promise<BrowseResult>;
   openTab(url: string, place: { windowId: string; group: string | null; activate: boolean }): Promise<{ tabId: string; group: string | null }>;
   closeTab(tabId: string): Promise<void>;
   activateTab(tabId: string): Promise<void>;
@@ -38,6 +39,7 @@ export type ToolContext = {
   onUse?: (use: ToolUse) => void;
   onBanner?: (tabId: string, chatId: string | null) => void;
   signal?: AbortSignal;
+  run?: RunToken;
 };
 
 export class ToolFailure extends Error {
@@ -68,7 +70,7 @@ function titleOf(tab: FlatTab | undefined) {
 }
 
 function stoppedGuard(ctx: ToolContext, chatId: string) {
-  if (ctx.memory.stopped(chatId)) throw new ToolFailure("stopped", "The person stopped you. Don't use tabs again until they send a new message.");
+  if (ctx.run ? ctx.run.signal.aborted : ctx.memory.stopped(chatId)) throw new ToolFailure("stopped", "The person stopped you. Don't use tabs again until they send a new message.");
 }
 
 async function permit(ctx: ToolContext, chatId: string, tool: string, kind: ToolKind, tab: FlatTab | undefined, snap: Snapshot, detail: string | null, preset?: Decision): Promise<void> {
@@ -146,7 +148,11 @@ async function withBanner<T>(ctx: ToolContext, chatId: string, tabId: string, ru
 
 async function browseOrFail(ctx: ToolContext, chatId: string, tabId: string, argv: string[]): Promise<string> {
   stoppedGuard(ctx, chatId);
-  const result = await ctx.host.browse(tabId, argv);
+  const result = await ctx.host.browse(tabId, argv, ctx.run?.signal).catch((error: unknown) => {
+    if (ctx.run?.signal.aborted) throw new ToolFailure("stopped", "The person stopped you. Don't use tabs again until they send a new message.");
+    throw error;
+  });
+  stoppedGuard(ctx, chatId);
   if (!result.ok) throw new ToolFailure("browse_failed", result.error ?? "Ardia couldn't do that on the page.");
   return result.text ?? "";
 }

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { handleApi } from "../runtime/src/ardiaApi.ts";
+import { Runs } from "../runtime/src/runs.ts";
 
 const CHAT = "0b9e6c1e-2f4a-4c55-9d7e-1a2b3c4d5e6f";
 
@@ -24,7 +25,7 @@ function deps({ split = false, grouped = false } = {}) {
         groupWithChat: async (chatTabId, ids) => (calls.push(["group", chatTabId, ...ids]), { group: "g1" }),
         splitToGroup: async (chatTabId) => (calls.push(["splitToGroup", chatTabId]), { group: "g2" }),
       },
-      state: { memory: { tag: () => {}, resume: () => {}, startOnce: () => false } },
+      state: { memory: { tag: () => {}, startOnce: () => false }, runs: new Runs(), asks: { cancelChat: () => {} } },
       values: () => ({}),
       appVersion: "",
       workspaceRoot: "",
@@ -62,4 +63,14 @@ test("a later tag joins the chat's group", async () => {
   await send(w.deps, ["bank"]);
   assert.deepEqual(w.calls, [["group", "chat", "bank"]]);
   assert.deepEqual(w.counts, ["tag_groups_joined"]);
+});
+
+test("a New Tab prompt with a long query opens its chat instead of a blank tab", async () => {
+  const w = deps();
+  const opened = [];
+  w.deps.openPage = async (path) => (opened.push(path), { tabId: "t" });
+  const query = `q=${"a".repeat(590)}`;
+  const r = await handleApi("POST", "/ardia/open", new URLSearchParams(), { path: `0b9e6c1e-2f4a-4c55-9d7e-1a2b3c4d5e6f?${query}` }, w.deps);
+  assert.equal(r.status, 200);
+  assert.equal(opened[0].length, 36 + 1 + query.length);
 });

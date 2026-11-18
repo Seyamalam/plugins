@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off extendsNativeError:off effectFnOpportunity:off globalFetch:off
+import { Runs } from "./runs.ts";
 import * as Fs from "node:fs";
 import * as Path from "node:path";
 import { Asks } from "./asks.ts";
@@ -50,12 +51,11 @@ export type ChatMemory = ChatMemoryStore & {
 
 const ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 
-export function fileChatMemory(dataDir: string): ChatMemory {
+export function fileChatMemory(dataDir: string, runs: Runs = new Runs()): ChatMemory {
   const file = Path.join(dataDir, "chats.json");
   const opened = new Map<string, Map<string, string | null>>();
   const readPages = new Set<string>();
   const tagged = new Map<string, Set<string>>();
-  const stopped = new Set<string>();
   const started = new Set<string>();
   const saved = readJson(file)?.chats;
   if (saved && typeof saved === "object") {
@@ -114,9 +114,9 @@ export function fileChatMemory(dataDir: string): ChatMemory {
       for (const set of tagged.values()) set.delete(tabId);
       persist();
     },
-    stopped: (chatId) => stopped.has(chatId),
-    stop: (chatId) => void stopped.add(chatId),
-    resume: (chatId) => void stopped.delete(chatId),
+    stopped: (chatId) => runs.stopped(chatId),
+    stop: (chatId) => runs.stop(chatId),
+    resume: (chatId) => void runs.begin(chatId),
     startOnce: (chatId) => {
       if (started.has(chatId)) return false;
       started.add(chatId);
@@ -132,6 +132,7 @@ export type PluginState = {
   asks: Asks;
   grants: GrantStore;
   memory: ChatMemory;
+  runs: Runs;
   counts: UsageCounts;
   telemetry: Telemetry;
   banners: Map<string, string>;
@@ -141,7 +142,10 @@ export type PluginState = {
 let state: PluginState | null = null;
 
 export function pluginState(dataDir: string): PluginState {
-  if (!state) state = { asks: new Asks(), grants: fileGrantStore(dataDir), memory: fileChatMemory(dataDir), counts: {}, telemetry: new Telemetry(null), banners: new Map(), notes: new Set() };
+  if (!state) {
+    const runs = new Runs();
+    state = { asks: new Asks(), grants: fileGrantStore(dataDir), memory: fileChatMemory(dataDir, runs), runs, counts: {}, telemetry: new Telemetry(null), banners: new Map(), notes: new Set() };
+  }
   return state;
 }
 
