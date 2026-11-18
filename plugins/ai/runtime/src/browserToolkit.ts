@@ -22,7 +22,7 @@ const annotateTool = <T extends Tool.Any>(tool: T, readonly: boolean): T =>
     .annotate(Tool.Readonly, readonly)
     .annotate(Tool.Destructive, false)
     .annotate(Tool.OpenWorld, true)
-    .annotate(McpSchema.EnabledWhen, () => McpInvocationContext.hiddenFromOutsideClients() && McpInvocationContext.hiddenFromSubagents())
+    .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients)
     .annotate(Tool.Meta, { "anthropic/alwaysLoad": true }) as T;
 
 const shared = {

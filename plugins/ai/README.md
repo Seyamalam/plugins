@@ -62,7 +62,7 @@ plugins/ai/
   call never gets a newer turn's authority. Stop aborts every turn of the chat for good and holds the chat: a turn T3
   launches afterwards starts stopped unless it answers the message the page named in its next `/ardia/send`.
   `thread.stop` runs in-process. Tools check their turn before every host call, after every host reply and when a
-  permission ask settles; subagent callers are refused. Finished turns are dropped at once.
+  permission ask settles; a subagent caller is refused. Finished turns are dropped at once.
 - **Tools** (`runtime/src/browserToolkit.ts`) are an MCP toolkit in T3's MCP server, which T3 already gives every
   provider session with a bearer of its own, so a call always knows its chat (`McpInvocationContext`; a chat can't
   act as another). It replaces T3's own toolkits: an agent in Ardia gets `ardia_chat_context`, `ardia_list_tabs`,
