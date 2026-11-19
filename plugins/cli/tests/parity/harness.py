@@ -24,18 +24,49 @@ CASES = Path(__file__).resolve().parent / "cases"
 BLOBS = Path(__file__).resolve().parent / "blobs.json"
 INSTALL_ID = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
 KEPT_ENV = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "SHELL")
+PROTECTED_ENV = frozenset({"HOME", "ARDIA_CLI_HOME", "TMPDIR", "PATH", "ARDIA_TELEMETRY_URL", "http_proxy", "https_proxy",
+                           "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "ALL_PROXY", "all_proxy", "PYTHONPATH",
+                           "PYTHONHOME", "PYTHONSTARTUP", "PYTHONDONTWRITEBYTECODE", "ARDIA_PARITY_PYTHON_LOG", "ARDIA_PARITY_BOX",
+                           "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"})
 VOLATILE = ("uuid", "timestamp")
 VOLATILE_PROPERTIES = ("$session_id", "total_ms", "startup_ms", "served_by")
 QUEUED = {"uuid": "0190a1b2-c3d4-7e5f-8a9b-000000000001", "event": "cli_command", "distinct_id": INSTALL_ID,
           "timestamp": "2026-01-01T00:00:00.000Z", "properties": {"command": "earlier"}}
 DEFAULT_HELLO = {"result": {"app": "Ardia", "version": "1.0"}}
 STUBBED_HELPERS = ("open", "xdg-open", "osascript", "security", "esbuild", "cua-driver", "git", "node", "pbcopy", "pbpaste",
-                   "screencapture", "ffmpeg", "defaults", "launchctl", "say", "afplay")
-OBSERVED_APART = ("data/Telemetry/local", "data/Telemetry/cli-queue.jsonl", "data/Telemetry/cli-flush.json", "data/Telemetry/cli-flush.lock",
-                  "cli-home/Usage/usage.json", "helpers.log")
+                   "screencapture", "ffmpeg", "defaults", "launchctl", "say", "afplay", "codesign", "ditto", "systemctl")
+DENIED_PROGRAMS = ("/bin/launchctl", "/usr/bin/security", "/usr/bin/codesign", "/usr/bin/ditto", "/usr/bin/osascript",
+                   "/usr/bin/open", "/usr/bin/pbcopy", "/usr/bin/pbpaste", "/usr/sbin/screencapture", "/usr/bin/say",
+                   "/usr/bin/afplay", "/usr/bin/defaults", "/usr/bin/curl", "/usr/bin/ssh")
+ROOTS = ("home", "cli-home", "data", "cwd", "tmp", "outside")
+PLACES = ("box", "home", "cli_home", "data", "cwd", "tmp", "outside", "cli")
+HARNESS_FILES = ("helpers.log", "route.log", "stubs")
+CONTENT_APART = ("data/Telemetry/local", "data/Telemetry/cli-queue.jsonl", "data/Telemetry/cli-flush.json", "cli-home/Usage/usage.json")
+READ_ONLY_METHODS = frozenset({"hello", "workspace", "windows", "commands"})
+ABSENT = "<absent>"
 TIME_KEYS = re.compile(r"(_at|At|_ms|time|Time)$")
+PLAUSIBLE_TIME = 1e9
 SIDES = ("rust", "python")
 TIMEOUT = 60
+DRAIN_TIMEOUT = 5
+HELPER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+SANDBOX_PROFILE = """(version 1)
+(allow default)
+(deny network-outbound (remote ip))
+(deny network-inbound (local ip))
+(deny network-outbound (remote unix-socket))
+(allow network-outbound (remote unix-socket (subpath (param "BOX"))))
+(deny file-write* (require-not (require-any (subpath (param "BOX")) (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") (regex #"^/dev/fd/"))))
+(deny process-exec {denied})
+"""
+ROUTE_PROBE = (
+    "import os, sys; log = os.environ.get('ARDIA_PARITY_PYTHON_LOG'); "
+    "log and ' -m ardia_cli ' in ' ' + ' '.join(getattr(sys, 'orig_argv', [])) + ' ' and open(log, 'a').write('python\\n')\n"
+)
+
+
+class UnsafeCase(ValueError):
+    pass
 
 
 def binary() -> Path | None:
@@ -47,6 +78,15 @@ def binary() -> Path | None:
         if found.exists():
             return found
     return None
+
+
+def sandbox_mode() -> str:
+    if sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").exists():
+        return "sandbox-exec"
+    if os.environ.get("CI") == "true" or os.environ.get("ARDIA_PARITY_UNSANDBOXED") == "1":
+        return "none"
+    raise RuntimeError("the parity harness runs both sides under sandbox-exec, which this system lacks; on a throwaway machine "
+                       "(CI sets CI=true) or with ARDIA_PARITY_UNSANDBOXED=1 it runs them unconfined")
 
 
 def command_of(argv: list, python_label: str | None) -> str | None:
@@ -123,7 +163,9 @@ class Case:
         unknown = set(row) - known
         if unknown:
             raise ValueError(f"{source}: case {row.get('id')!r} has unknown keys {sorted(unknown)}")
-        return cls(**{**row, "source": source})
+        case = cls(**{**row, "source": source})
+        check_case_is_contained(case)
+        return case
 
     def to_dict(self) -> dict:
         row = {"id": self.id, "command": self.command, "argv": self.argv}
@@ -133,6 +175,50 @@ class Case:
             if value != getattr(defaults, name):
                 row[name] = value
         return row
+
+
+SKETCH = {"box": "/BOX", "home": "/BOX/home", "cli_home": "/BOX/cli-home", "data": "/BOX/data", "cwd": "/BOX/cwd", "tmp": "/BOX/tmp",
+          "outside": "/BOX/outside", "cli": "/CLI"}
+
+
+def contained_path(text: str) -> bool:
+    import posixpath
+
+    for name, sketch in SKETCH.items():
+        mark = "{" + name + "}"
+        if text == mark or text.startswith(mark + "/"):
+            root = "/CLI" if name == "cli" else "/BOX"
+            resolved = posixpath.normpath(sketch + text[len(mark):])
+            return resolved == root or resolved.startswith(root + "/")
+    if text.startswith("/"):
+        return False
+    resolved = posixpath.normpath(posixpath.join(SKETCH["cwd"], text))
+    return resolved.startswith("/BOX/")
+
+
+def check_case_is_contained(case: Case) -> None:
+    where = f"case {case.id!r}"
+    for rel in case.files:
+        parts = Path(rel).parts
+        if not parts or Path(rel).is_absolute() or ".." in parts or parts[0] not in ROOTS:
+            raise UnsafeCase(f"{where}: file {rel!r} must be a plain path under one of {', '.join(ROOTS)}")
+    for name in case.helpers:
+        if not HELPER_NAME.match(name):
+            raise UnsafeCase(f"{where}: helper name {name!r} isn't a plain program name")
+    for key, value in case.env.items():
+        if key in PROTECTED_ENV:
+            raise UnsafeCase(f"{where}: ${key} belongs to the sandbox and can't be set or removed by a case")
+        if key == "ARDIA_DATA_DIR" and value is not None and not contained_path(value):
+            raise UnsafeCase(f"{where}: $ARDIA_DATA_DIR must be unset or a {{box}} path, not {value!r}")
+    for token in case.argv:
+        if not isinstance(token, str):
+            raise UnsafeCase(f"{where}: argv holds {token!r}, not text")
+        candidates = [token] + ([token.split("=", 1)[1]] if token.startswith("--") and "=" in token else [])
+        for candidate in candidates:
+            if ("/" in candidate or candidate == "..") and not contained_path(candidate):
+                raise UnsafeCase(f"{where}: argv path {candidate!r} is outside the sandbox (use {{data}}, {{home}}, {{outside}} …)")
+            if candidate.startswith("~"):
+                raise UnsafeCase(f"{where}: argv path {candidate!r} would expand outside the sandbox")
 
 
 def load_cases(root: Path = CASES) -> list[Case]:
@@ -157,7 +243,7 @@ class FakeArdia:
         self.hello = hello
         self.replies = {method: list(reply) if isinstance(reply, list) else [reply] for method, reply in replies.items()}
         self.events = events
-        self.requests = []
+        self.connections = []
         self.lock = threading.Lock()
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(str(path))
@@ -167,13 +253,25 @@ class FakeArdia:
         self.thread = threading.Thread(target=self.accept, daemon=True)
         self.thread.start()
 
+    @property
+    def requests(self) -> list:
+        with self.lock:
+            return [(method, params) for transcript in self.connections for _, method, params in transcript]
+
+    def transcript(self) -> list:
+        with self.lock:
+            return [list(transcript) for transcript in self.connections]
+
     def accept(self):
         while not self.stopped.is_set():
             try:
                 connection, _ = self.server.accept()
             except (socket.timeout, OSError):
                 continue
-            threading.Thread(target=self.talk, args=(connection,), daemon=True).start()
+            with self.lock:
+                transcript = []
+                self.connections.append(transcript)
+            threading.Thread(target=self.talk, args=(connection, transcript), daemon=True).start()
 
     def next_reply(self, method):
         if method == "hello":
@@ -185,18 +283,23 @@ class FakeArdia:
             reply = queue.pop(0) if len(queue) > 1 else queue[0]
         return reply() if callable(reply) else reply
 
-    def talk(self, connection):
+    def talk(self, connection, transcript):
         try:
             with connection, connection.makefile("rb") as lines:
                 for line in lines:
                     try:
                         request = json.loads(line)
                     except ValueError:
-                        self.requests.append(("<not json>", line.decode("utf-8", "backslashreplace")))
+                        with self.lock:
+                            transcript.append((None, "<not json>", line.decode("utf-8", "backslashreplace")))
+                        continue
+                    if not isinstance(request, dict):
+                        with self.lock:
+                            transcript.append((None, "<not an object>", request))
                         continue
                     method = request.get("method")
                     with self.lock:
-                        self.requests.append((method, request.get("params")))
+                        transcript.append((request.get("id", ABSENT), method, request.get("params", ABSENT)))
                     reply = self.next_reply(method)
                     if reply == "close":
                         return
@@ -231,6 +334,7 @@ class Observed:
     usage: object
     files: dict
     helpers: list
+    route: str = "rust"
     timed_out: bool = False
 
 
@@ -240,9 +344,10 @@ def tree(root: Path) -> dict:
         return found
     for path in sorted(root.rglob("*")):
         rel = str(path.relative_to(root))
-        if any(rel == apart or rel.startswith(apart + "/") for apart in OBSERVED_APART):
+        if any(rel == own or rel.startswith(own + "/") for own in HARNESS_FILES):
             continue
         info = path.lstat()
+        apart = any(rel == name or rel.startswith(name + "/") for name in CONTENT_APART)
         if stat.S_ISDIR(info.st_mode):
             found[rel] = ("dir", stat.S_IMODE(info.st_mode))
         elif stat.S_ISLNK(info.st_mode):
@@ -250,8 +355,7 @@ def tree(root: Path) -> dict:
         elif stat.S_ISSOCK(info.st_mode):
             found[rel] = ("socket",)
         elif stat.S_ISREG(info.st_mode):
-            body = path.read_bytes()
-            found[rel] = ("file", stat.S_IMODE(info.st_mode), body)
+            found[rel] = ("file", stat.S_IMODE(info.st_mode), b"<compared apart>" if apart else path.read_bytes())
         else:
             found[rel] = ("other",)
     return found
@@ -272,39 +376,75 @@ def file_changes(before: dict, after: dict) -> dict:
 
 def scrub_times(value):
     if isinstance(value, dict):
-        return {key: "<time>" if TIME_KEYS.search(key) and isinstance(child, (int, float)) else scrub_times(child) for key, child in value.items()}
+        return {key: time_marker(child) if TIME_KEYS.search(key) else scrub_times(child) for key, child in value.items()}
     if isinstance(value, list):
         return [scrub_times(child) for child in value]
     return value
 
 
+def time_marker(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < PLAUSIBLE_TIME:
+        return scrub_times(value)
+    return f"<time {type(value).__name__}>"
+
+
 class Installation:
     def __init__(self, rust_binary: Path, scratch: Path | None = None):
-        self.scratch = scratch or Path(tempfile.mkdtemp(prefix="arp", dir="/tmp"))
+        self.sandbox = sandbox_mode()
+        self.scratch = Path(scratch or tempfile.mkdtemp(prefix="arp", dir="/tmp")).resolve()
         self.root = self.scratch / "cli"
         (self.root / "bin").mkdir(parents=True)
         shutil.copy2(rust_binary, self.root / "bin" / "ardia")
         subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(self.root / "python")], check=True)
         self.python = self.root / "python" / "bin" / "python3"
-        packages = subprocess.run([str(self.python), "-I", "-c", "import site; print(site.getsitepackages()[0])"],
-                                  check=True, capture_output=True, text=True).stdout.strip()
-        (Path(packages) / "ardia-checkout.pth").write_text("\n".join([str(CLI), *site.getsitepackages()]) + "\n")
-        self.stubs = self.scratch / "stubs"
-        self.stubs.mkdir()
+        self.source = self.scratch / "src"
+        shutil.copytree(CLI / "ardia_cli", self.source / "ardia_cli", ignore=shutil.ignore_patterns("__pycache__"))
+        self.packages = Path(subprocess.run([str(self.python), "-I", "-c", "import site; print(site.getsitepackages()[0])"],
+                                            check=True, capture_output=True, text=True).stdout.strip())
+        (self.packages / "ardia-checkout.pth").write_text("\n".join([str(self.source), *site.getsitepackages()]) + "\n")
+        (self.packages / "ardia-parity-route.pth").write_text(ROUTE_PROBE)
+        subprocess.run([str(self.python), "-I", "-m", "compileall", "-q", str(self.source)], check=True)
+        self.profile = self.scratch / "sandbox.sb"
+        self.profile.write_text(SANDBOX_PROFILE.format(denied=" ".join(f'(literal "{program}")' for program in DENIED_PROGRAMS)))
         self.counter = 0
         self.counter_lock = threading.Lock()
 
     def close(self):
+        reap(str(self.scratch))
         shutil.rmtree(self.scratch, True)
 
     def command(self, side: str) -> list[str]:
         return [str(self.root / "bin" / "ardia")] if side == "rust" else [str(self.python), "-I", "-m", "ardia_cli"]
+
+    def confined(self, argv: list[str], box: Path) -> list[str]:
+        if self.sandbox == "sandbox-exec":
+            return ["/usr/bin/sandbox-exec", "-f", str(self.profile), "-D", f"BOX={box}", *argv]
+        return argv
 
     def box(self) -> Path:
         with self.counter_lock:
             self.counter += 1
             number = self.counter
         return self.scratch / f"c{number}"
+
+
+def reap(marker: str) -> None:
+    if sys.platform == "darwin":
+        listing = subprocess.run(["/bin/ps", "-x", "-E", "-ww", "-o", "pid=,command="], capture_output=True, text=True).stdout
+    else:
+        listing = ""
+        for entry in Path("/proc").glob("[0-9]*"):
+            try:
+                listing += f"{entry.name} " + (entry / "environ").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace") + "\n"
+            except OSError:
+                continue
+    for line in listing.splitlines():
+        pid_text, _, rest = line.strip().partition(" ")
+        if pid_text.isdigit() and int(pid_text) != os.getpid() and re.search(rf"ARDIA_PARITY_BOX={re.escape(marker)}(/|\s|$)", rest):
+            try:
+                os.kill(int(pid_text), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
 
 
 def write_stub(directory: Path, name: str, spec: dict, log: Path):
@@ -323,8 +463,22 @@ def write_stub(directory: Path, name: str, spec: dict, log: Path):
     path.chmod(0o755)
 
 
+def inside(box: Path, path: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(box.resolve())
+    except OSError:
+        return False
+
+
+def places_of(box: Path) -> dict:
+    return {"box": str(box), "home": str(box / "home"), "cli_home": str(box / "cli-home"), "data": str(box / "data"),
+            "cwd": str(box / "cwd"), "tmp": str(box / "tmp"), "outside": str(box / "outside"), "cli": str(CLI)}
+
+
 def materialize(box: Path, case: Case) -> dict:
-    for name in ("home", "cli-home", "data", "cwd", "tmp"):
+    check_case_is_contained(case)
+    box.mkdir(parents=True)
+    for name in ROOTS:
         (box / name).mkdir(parents=True, exist_ok=True)
     data = box / "data"
     consent = case.consent
@@ -334,12 +488,14 @@ def materialize(box: Path, case: Case) -> dict:
     telemetry.mkdir(mode=0o700, exist_ok=True)
     if consent is not None and consent.get("sharing", True) is True:
         (telemetry / "cli-queue.jsonl").write_text(json.dumps(QUEUED) + "\n")
-    places = {"box": str(box), "home": str(box / "home"), "cli_home": str(box / "cli-home"), "data": str(data),
-              "cwd": str(box / "cwd"), "tmp": str(box / "tmp"), "outside": str(box / "outside"), "cli": str(CLI)}
-    (box / "outside").mkdir(exist_ok=True)
+    places = places_of(box)
     for rel, spec in case.files.items():
         path = box / rel
         path.parent.mkdir(parents=True, exist_ok=True)
+        if not inside(box, path.parent):
+            raise UnsafeCase(f"case {case.id!r}: {rel} would be written through a link that leaves the sandbox")
+        if path.is_symlink():
+            raise UnsafeCase(f"case {case.id!r}: {rel} would be written through a link")
         if isinstance(spec, dict) and spec.get("dir"):
             path.mkdir(exist_ok=True)
             continue
@@ -349,7 +505,10 @@ def materialize(box: Path, case: Case) -> dict:
         path.write_bytes(file_bytes(spec, places))
         if isinstance(spec, dict) and "mode" in spec:
             path.chmod(int(spec["mode"]))
-    (telemetry / "cli-flush.json").write_text(json.dumps({"failures": 0, "next_at": 9e12}))
+    flush = telemetry / "cli-flush.json"
+    if not inside(box, flush.parent) or flush.is_symlink():
+        raise UnsafeCase(f"case {case.id!r}: its Telemetry folder leaves the sandbox")
+    flush.write_text(json.dumps({"failures": 0, "next_at": 9e12}))
     stubs = box / "stubs"
     stubs.mkdir(exist_ok=True)
     log = box / "helpers.log"
@@ -387,6 +546,8 @@ def environment(box: Path, places: dict, case: Case) -> dict:
         "COLUMNS": "100",
         "LINES": "40",
         "PYTHONDONTWRITEBYTECODE": "1",
+        "ARDIA_PARITY_PYTHON_LOG": str(box / "route.log"),
+        "ARDIA_PARITY_BOX": str(box),
     })
     for key, value in expand(case.env, places).items():
         if value is None:
@@ -425,7 +586,7 @@ def run_side(install: Installation, side: str, case: Case, box: Path) -> tuple[O
     stdin = decode_blob(expand(case.stdin, places) if isinstance(case.stdin, str) else case.stdin)
     timed_out = False
     try:
-        process = subprocess.Popen(install.command(side) + expand(list(case.argv), places), cwd=places["cwd"],
+        process = subprocess.Popen(install.confined(install.command(side) + expand(list(case.argv), places), box), cwd=places["cwd"],
                                    env=environment(box, places, case), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, start_new_session=True)
         try:
@@ -433,7 +594,12 @@ def run_side(install: Installation, side: str, case: Case, box: Path) -> tuple[O
         except subprocess.TimeoutExpired:
             timed_out = True
             os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
+            reap(str(box))
+            try:
+                stdout, stderr = process.communicate(timeout=DRAIN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = b"", b""
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
@@ -441,14 +607,17 @@ def run_side(install: Installation, side: str, case: Case, box: Path) -> tuple[O
     finally:
         if fake:
             fake.close()
+        reap(str(box))
     after = tree(box)
     records, queued, served, labels = read_telemetry(box / "data")
     usage_path = box / "cli-home" / "Usage" / "usage.json"
     usage = scrub_times(json.loads(usage_path.read_text())) if usage_path.exists() else None
     log = box / "helpers.log"
     helpers = log.read_text().splitlines() if log.exists() else []
-    observed = Observed(stdout, stderr, process.returncode, fake.requests if fake else [], records, queued, served, usage,
-                        file_changes(before, after), helpers, timed_out)
+    route_log = box / "route.log"
+    route = "python" if route_log.exists() and route_log.read_text().strip() else "rust"
+    observed = Observed(stdout, stderr, process.returncode, fake.transcript() if fake else [], records, queued, served, usage,
+                        file_changes(before, after), helpers, route, timed_out)
     return apply_normalizers(observed, case, places), labels
 
 
@@ -488,12 +657,23 @@ def text_of(value) -> str:
 FIELDS = ("status", "stdout", "stderr", "requests", "telemetry", "queued", "usage", "files", "helpers", "timed_out")
 
 
+def read_only(connection: list) -> bool:
+    return bool(connection) and all(method in READ_ONLY_METHODS for _, method, _ in connection)
+
+
+def fallback_requests(rust: list, python: list) -> list:
+    extra = len(rust) - len(python)
+    if extra > 0 and rust[extra:] == python and all(read_only(connection) for connection in rust[:extra]):
+        return python
+    return rust
+
+
 def compare(rust: Observed, python: Observed, fallback: bool = False) -> list[tuple[str, str]]:
     mismatches = []
     for name in FIELDS:
         left, right = getattr(python, name), getattr(rust, name)
-        if name == "requests" and fallback and left and len(right) > len(left):
-            right = right[-len(left):]
+        if name == "requests" and fallback:
+            right = fallback_requests(right, left)
         if left == right:
             continue
         diff = "\n".join(difflib.unified_diff(text_of(left).splitlines(), text_of(right).splitlines(), "python", "rust", lineterm=""))
@@ -505,13 +685,17 @@ def compare(rust: Observed, python: Observed, fallback: bool = False) -> list[tu
 class Outcome:
     case: Case
     mismatches: list
-    rust_served: list
+    rust_route: str
     python_labels: list
     problems: list
 
     @property
     def passed(self) -> bool:
         return not self.mismatches and not self.problems
+
+    @property
+    def native(self) -> bool:
+        return self.passed and self.rust_route == "rust"
 
     def report(self) -> str:
         lines = [f"✗ {self.case.id} ({self.case.source}): ardia {' '.join(self.case.argv)}"]
@@ -540,27 +724,32 @@ def check_case(install: Installation, case: Case, served: set[str], keep: bool =
     named = command_of(case.argv, labels[-1] if labels else None)
     if named is not None and named != case.command:
         problems.append(f"this call is {named!r}, the case says {case.command!r}")
-    if python.served_by:
-        expected = "rust" if case.command in served and not case.fallback else "python"
-        if rust.served_by[-1:] != [expected]:
-            problems.append(f"expected {expected} to serve it, telemetry says {rust.served_by[-1:]}")
+    if python.route != "python":
+        problems.append("the Python side never started the bundled Python")
+    expected = "rust" if case.command in served and not case.fallback else "python"
+    if rust.route != expected:
+        problems.append(f"expected {expected} to serve it, but {rust.route} did")
+    if rust.served_by and rust.served_by[-1] != rust.route:
+        problems.append(f"telemetry says {rust.served_by[-1]} served it, but {rust.route} did")
     if python.timed_out:
         problems.append(f"Python didn't finish in {TIMEOUT} s")
-    return Outcome(case, compare(rust, python, case.fallback), rust.served_by, labels, problems)
+    return Outcome(case, compare(rust, python, case.fallback), rust.route, labels, problems)
 
 
 def summarize(outcomes: list[Outcome], served: list[str]) -> dict:
     commands = {}
     for outcome in outcomes:
-        row = commands.setdefault(outcome.case.command, {"cases": 0, "passed": 0, "failed": [], "served": outcome.case.command in served})
+        row = commands.setdefault(outcome.case.command, {"cases": 0, "passed": 0, "native": 0, "failed": [], "served": outcome.case.command in served})
         row["cases"] += 1
         if outcome.passed:
             row["passed"] += 1
         else:
             row["failed"].append(outcome.case.id)
+        if outcome.native:
+            row["native"] += 1
     for name in served:
-        commands.setdefault(name, {"cases": 0, "passed": 0, "failed": [], "served": True})
-    proven = sorted(name for name, row in commands.items() if row["cases"] and row["passed"] == row["cases"])
+        commands.setdefault(name, {"cases": 0, "passed": 0, "native": 0, "failed": [], "served": True})
+    proven = sorted(name for name, row in commands.items() if row["cases"] and row["passed"] == row["cases"] and row["native"])
     return {"served": served, "proven": proven, "unproven_but_served": sorted(set(served) - set(proven)), "commands": dict(sorted(commands.items()))}
 
 

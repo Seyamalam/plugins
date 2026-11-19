@@ -61,6 +61,82 @@ class ProtocolAgrees(unittest.TestCase):
         self.assertEqual(int(constants["MIN_APP_PROTOCOL"]), control.MIN_APP_PROTOCOL)
 
 
+class HarnessRules(unittest.TestCase):
+    def case(self, **row):
+        return harness.Case.from_dict({"id": "t", "command": "windows", "argv": ["windows"], **row}, "test")
+
+    def test_a_case_cannot_reach_outside_its_sandbox(self):
+        for row in ({"files": {"../x": "y"}}, {"files": {"data/../../x": "y"}}, {"files": {"/etc/x": "y"}}, {"files": {"elsewhere/x": "y"}},
+                    {"argv": ["windows", "--data-dir", "/d"]}, {"argv": ["windows", "--data-dir=/d"]}, {"argv": ["windows", "--data-dir", "{data}/../../x"]},
+                    {"argv": ["config", "path", "~/x"]}, {"argv": ["plugins", "install", "../../x"]}, {"argv": ["plugins", "install", "{cli}/../x"]}, {"env": {"HOME": None}}, {"env": {"ARDIA_CLI_HOME": "/x"}}, {"env": {"PATH": "/bin"}},
+                    {"env": {"ARDIA_DATA_DIR": "/Users/someone/Ardia"}}, {"helpers": {"../launchctl": {}}}, {"helpers": {"/bin/sh": {}}}):
+            with self.subTest(row=row), self.assertRaises(harness.UnsafeCase):
+                self.case(**row)
+        self.case(argv=["windows", "--data-dir", "{box}/elsewhere"], env={"ARDIA_DATA_DIR": None, "COLUMNS": "80"})
+        self.case(argv=["theme", "check", "../evil"])
+        self.case(argv=["plugins", "call", "x", '{"who": "you/../me"}'])
+
+    def test_a_fallback_may_only_ask_read_only_questions_first(self):
+        python = [[(1, "hello", {"protocol": 4}), (2, "apply", {"ops": []})]]
+        read_first = [[(1, "hello", {"protocol": 4}), (2, "workspace", harness.ABSENT)]] + python
+        mutate_first = [[(1, "hello", {"protocol": 4}), (2, "apply", {"ops": []})]] + python
+        self.assertEqual(harness.fallback_requests(read_first, python), python)
+        self.assertEqual(harness.fallback_requests(mutate_first, python), mutate_first)
+        self.assertNotEqual([[(2, "windows", None)]], [[(2, "windows", harness.ABSENT)]])
+
+    def test_times_are_scrubbed_only_when_they_look_like_times(self):
+        scrubbed = harness.scrub_times({"last_at": 1_763_500_000.5, "first_ms": 1_763_500_000_000, "next_at": 0, "open_at": False, "done_at": None, "count": 5})
+        self.assertEqual(scrubbed, {"last_at": "<time float>", "first_ms": "<time int>", "next_at": 0, "open_at": False, "done_at": None, "count": 5})
+
+    @unittest.skipUnless(sys.platform == "darwin", "sandbox-exec is macOS's")
+    def test_the_sandbox_keeps_writes_sockets_and_helpers_inside(self):
+        install = harness.Installation(binary() or Path(sys.executable))
+        try:
+            box = install.box()
+            box.mkdir()
+            outside = install.scratch / "outside-the-box"
+            script = f"echo in > {box}/in; echo out > {outside}; /bin/launchctl list >/dev/null 2>&1 || echo launchctl-denied"
+            done = subprocess.run(install.confined(["/bin/sh", "-c", script], box), capture_output=True, text=True, timeout=30)
+            self.assertTrue((box / "in").exists())
+            self.assertFalse(outside.exists())
+            self.assertIn("launchctl-denied", done.stdout)
+        finally:
+            install.close()
+
+    def test_detached_children_are_reaped(self):
+        box = Path(tempfile.mkdtemp(prefix="reap", dir="/tmp")).resolve()
+        try:
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], env={**os.environ, "ARDIA_PARITY_BOX": str(box)},
+                                     start_new_session=True)
+            self.assertTrue(harness.wait_until(lambda: str(box) in subprocess.run(["/bin/ps", "-x", "-E", "-ww", "-o", "command="], capture_output=True,
+                                                                               text=True).stdout or sys.platform != "darwin", 5))
+            harness.reap(str(box))
+            child.wait(timeout=5)
+            self.assertEqual(child.returncode, -signal.SIGKILL)
+        finally:
+            shutil.rmtree(box, True)
+
+
+@unittest.skipUnless(binary(), "build plugins/cli/rust first (cargo build) or set ARDIA_RUST_CLI")
+class HarnessCatches(unittest.TestCase):
+    def test_a_binary_that_hands_everything_to_python_proves_nothing(self):
+        scratch = Path(tempfile.mkdtemp(prefix="arh", dir="/tmp"))
+        try:
+            impostor = scratch / "ardia"
+            impostor.write_text('#!/bin/sh\nhere=$(cd "$(dirname "$0")/.." && pwd)\nexec "$here/python/bin/python3" -I -m ardia_cli "$@"\n')
+            impostor.chmod(0o755)
+            cases = [case for case in harness.load_cases() if case.id in ("version--version", "windows--windows") or case.id.startswith("tabs--tabs-json")]
+            self.assertTrue(cases)
+            outcomes, install = harness.run_all(cases, impostor)
+            install.close()
+            self.assertTrue(all(not outcome.passed for outcome in outcomes), [outcome.case.id for outcome in outcomes if outcome.passed])
+            self.assertTrue(all("expected rust to serve it, but python did" in outcome.problems for outcome in outcomes))
+            summary = harness.summarize(outcomes, ["--version", "windows", "tabs"])
+            self.assertEqual(summary["unproven_but_served"], ["--version", "tabs", "windows"])
+        finally:
+            shutil.rmtree(scratch, True)
+
+
 @unittest.skipUnless(binary(), "build plugins/cli/rust first (cargo build) or set ARDIA_RUST_CLI")
 class RustProcess(unittest.TestCase):
     @classmethod

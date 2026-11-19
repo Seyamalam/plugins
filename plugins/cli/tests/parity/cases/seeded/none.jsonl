@@ -1,1 +1,1 @@
-{"id": "seed--sharedflags-test-missing-value--none--1", "command": "none", "argv": ["--port"], "env": {"LANG": "C.UTF-8", "ARDIA_DATA_DIR": null, "ARDIA_CLI_HOME": null}, "note": "from test_cli.SharedFlags.test_missing_value"}
+{"id": "seed--sharedflags-test-missing-value--none--1", "command": "none", "argv": ["--port"], "note": "from test_cli.SharedFlags.test_missing_value"}

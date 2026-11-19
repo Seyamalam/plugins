@@ -1654,21 +1654,28 @@ Any Chromium works for `--port`: `chromium --headless=new --remote-debugging-por
 ### Rust parity
 
 The command is moving from Python to Rust one command at a time (ardia-browser/ardia#2703). The Rust entry serves a
-command only when `rust/served.txt` lists it, and lists it only when every parity case for it passes; anything else,
-and any input the Rust code can't mirror exactly, goes to the bundled Python. A case (`tests/parity/cases/*.json`, one
-row each) gives argv, stdin, environment, the starting files, the control socket's replies (or no socket), consent and
-helper stubs. `python -m tests.parity` runs each case on both sides in the same throwaway HOME, CLI home and data dir,
-with `open`, `osascript`, `security`, `esbuild`, `cua-driver` and the other helpers stubbed on PATH and proxies
-pointed at a closed port, and compares stdout, stderr, exit code, the requests sent on the control socket,
-telemetry, usage, the files written and the helpers started, byte for byte, with a diff for each mismatch.
-`--command NAME` and `--case ID` narrow it, `--keep` keeps both sandboxes, and `--report` prints the table as JSON
-(per command: cases, passing, served) for a given commit. A case marked `fallback` is one Rust must hand to Python.
+command only when `rust/served.txt` lists it, and lists it only when every parity case for it passes and at least one
+of them ran natively; anything else, and any input the Rust code can't mirror exactly, goes to the bundled Python. A
+case (`tests/parity/cases/*.json`, one row each) gives argv, stdin, environment, the starting files, the control
+socket's replies (or no socket), consent and helper stubs; it may only name paths inside its sandbox and can't touch the
+sandbox's own variables. `python -m tests.parity` runs each case on both sides in the same throwaway HOME, CLI home and
+data dir, under `sandbox-exec` on macOS (writes, Unix sockets and the started programs stay in the sandbox; no IP
+network; `launchctl`, `security`, `codesign`, `osascript`, `open` and the like can't run), with helpers stubbed on PATH,
+and kills whatever either side left running. Elsewhere it runs only on a throwaway machine (`CI=true`, or
+`ARDIA_PARITY_UNSANDBOXED=1`). It compares stdout, stderr, exit code, each control-socket connection's requests (ids and
+params as sent), telemetry, usage, the files written (with modes) and the helpers started, byte for byte, with a diff
+for each mismatch, and it knows which side served a call from whether the bundled Python started, not from telemetry. A
+case marked `fallback` is one Rust must hand to Python; before handing off, Rust may only have asked read-only questions
+(`hello`, `workspace`, `windows`, `commands`). `--command NAME` and `--case ID` narrow a run, `--keep` keeps both
+sandboxes, and `--report` prints the table as JSON (per command: cases, passing, native, served) for a given commit.
 
 `python -m tests.parity.record` seeds `tests/parity/cases/seeded/` from the Python tests: it runs them with the entry
-points wrapped and keeps each in-process call whose replay gives the same result twice, for a command safe to run
-outside the test's mocks. `tests/test_rust_parity.py` runs the whole table, checks that `served.txt` lists only
-proven commands and that both sides speak the same control protocol, and keeps the process checks (Ctrl-C, leases, the
-flusher, paths that aren't UTF-8).
+points and the control client wrapped and keeps each in-process call whose replay in the sandbox gives the test's own
+exit status, stdout and stderr, twice, for a command safe to run outside the test's mocks. It keeps only variables the
+test set, and drops a recording that would carry a local path, the host name or an inherited variable. `tests/test_rust_parity.py` runs the whole
+table, checks that `served.txt` lists only proven commands, that both sides speak the same control protocol, that the
+harness refuses unsafe cases and catches a binary that hands everything to Python, and keeps the process checks
+(Ctrl-C, leases, the flusher, paths that aren't UTF-8).
 
 ## Linux
 

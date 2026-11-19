@@ -17,6 +17,7 @@ import io
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 import threading
@@ -124,6 +125,7 @@ class Recorder:
         self.dropped = []
         self.exchanges = None
         self.blobs = {}
+        self.baseline = dict(os.environ)
 
     def calling_test(self) -> str:
         frame = sys._getframe()
@@ -151,12 +153,24 @@ class Recorder:
             except Exception as error:
                 self.dropped.append((self.calling_test(), argv_list, f"recorder failed: {error!r}"))
                 start = None
+            streams = (sys.stdout, sys.stderr)
+            marks = [len(stream.getvalue()) if isinstance(stream, io.StringIO) else None for stream in streams]
+            status = None
             try:
-                return original(argv, *rest, **kwargs)
+                status = original(argv, *rest, **kwargs)
+                return status
+            except SystemExit as exit:
+                status = exit.code
+                raise
             finally:
                 self.depth.value = 0
                 if start is not None:
-                    self.finish(start)
+                    if None in marks:
+                        self.dropped.append((start["test"], start["argv"], "the test didn't capture its output"))
+                    else:
+                        start["expect"] = {"status": status if isinstance(status, int) else (0 if status is None else 1),
+                                           "stdout": streams[0].getvalue()[marks[0]:], "stderr": streams[1].getvalue()[marks[1]:]}
+                        self.finish(start)
         return entry
 
     def begin(self, argv: list) -> dict:
@@ -198,11 +212,11 @@ class Recorder:
     def finish(self, start: dict):
         exchanges, self.exchanges = self.exchanges, None
         try:
-            case = self.build(start, exchanges or [])
+            case, expect = self.build(start, exchanges or [])
         except Skip as reason:
             self.dropped.append((start["test"], start["argv"], str(reason)))
             return
-        self.records.append((start["test"], start["label"], case))
+        self.records.append((start["test"], start["label"], case, expect))
 
     def note(self, method, params, outcome):
         if self.exchanges is not None:
@@ -225,21 +239,16 @@ class Recorder:
 
         env = {}
         for key, value in start["env"].items():
-            if KEPT_ENV.match(key) and key not in SANDBOXED_ENV:
+            if KEPT_ENV.match(key) and key not in SANDBOXED_ENV and self.baseline.get(key) != value:
                 value = place(value)
                 if os.path.isabs(value) and not value.startswith("{"):
                     raise Skip(f"${key} points outside the test's throwaway dirs")
                 env[key] = value
-        for key in ("ARDIA_DATA_DIR", "ARDIA_CLI_HOME"):
-            if key not in start["env"]:
-                env[key] = None
-        argv = place(start["argv"])
+        argv = [token.replace(str(harness.CLI), "{cli}") for token in place(start["argv"])]
         for token in argv:
-            if token.startswith(str(harness.CLI)):
-                continue
-            if os.path.isabs(token) and not token.startswith("{") and os.path.exists(token):
-                raise Skip(f"{token} is outside the test's throwaway dirs")
-        argv = [token.replace(str(harness.CLI), "{cli}") for token in argv]
+            for candidate in [token] + ([token.split("=", 1)[1]] if token.startswith("--") and "=" in token else []):
+                if os.path.isabs(candidate) and not candidate.startswith("{"):
+                    raise Skip(f"{candidate} is outside the test's throwaway dirs")
         files = {}
         for rel, entry in start["files"].items():
             if "text" in entry:
@@ -251,10 +260,25 @@ class Recorder:
                 entry = {"link": target}
             files[rel] = entry
         control = self.control_of(exchanges, place)
-        case = {"argv": argv, "env": env, "files": {rel: self.blob(entry) for rel, entry in files.items()}, "control": control}
+        case = {"argv": argv, "env": env, "files": files, "control": control}
         if start["stdin"]:
             case["stdin"] = place(start["stdin"])
-        return case
+        self.check_private(case)
+        case["files"] = {rel: self.blob(entry) for rel, entry in files.items()}
+        expect = {key: (outside(place(value)).replace(str(harness.CLI), "{cli}") if isinstance(value, str) else value)
+                  for key, value in start["expect"].items()}
+        return case, expect
+
+    def check_private(self, case: dict) -> None:
+        text = json.dumps(case, ensure_ascii=False)
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+        markers = [str(REAL_HOME), socket.gethostname()]
+        if len(user) >= 3:
+            markers.append(f"/{user}/")
+        markers += [value for key, value in self.baseline.items() if len(value) >= 16 and not key.endswith("PATH")]
+        for marker in markers:
+            if marker and len(marker) >= 4 and marker in text:
+                raise Skip("it would carry something from this machine (a local path, the host name or an inherited variable)")
 
     def blob(self, entry: dict):
         if "dir" in entry or "link" in entry:
@@ -276,7 +300,7 @@ class Recorder:
         unreachable_every_time = True
         for method, params, outcome in exchanges:
             kind, value = outcome
-            if kind != "unreachable":
+            if kind != "unreachable" or value[1]:
                 unreachable_every_time = False
             if kind == "result":
                 try:
@@ -315,7 +339,7 @@ def install(recorder: Recorder):
         except control.Incompatible as error:
             return ("incompatible", str(error)), error
         except control.Unreachable as error:
-            return ("unreachable", str(error)), error
+            return ("unreachable", (str(error), bool(getattr(error, "sent", False)))), error
         except control.MethodError as error:
             return ("error", (error.code, error.message)), error
         return ("result", value), None
@@ -345,7 +369,7 @@ def install(recorder: Recorder):
                 recorder.note(method, params, ("error", (error.code, error.message)))
             raise
         except control.Unreachable as error:
-            recorder.note(method, params, ("unreachable", str(error)))
+            recorder.note(method, params, ("unreachable", (str(error), bool(getattr(error, "sent", False)))))
             raise
         recorder.note(method, params, ("result", value))
         return value
@@ -359,7 +383,7 @@ def install(recorder: Recorder):
             raise
         except control.Unreachable as error:
             if recorder.exchanges is not None and not any(method == "hello" for method, _, _ in recorder.exchanges):
-                recorder.note("connect", None, ("unreachable", str(error)))
+                recorder.note("connect", None, ("unreachable", (str(error), False)))
             raise
 
     control.Connection.call = connection_call
@@ -391,7 +415,15 @@ def replay_twice(install_root, case: harness.Case):
     shutil.rmtree(box, True)
     second, _ = harness.run_side(install_root, "python", case, box)
     shutil.rmtree(box, True)
-    return first, second, labels
+    return first, second, labels, harness.places_of(box)
+
+
+def reproduces(observed, expect: dict, places: dict) -> str | None:
+    wanted = {"status": expect["status"], "stdout": harness.expand(expect["stdout"], places).encode(),
+              "stderr": harness.expand(expect["stderr"], places).encode()}
+    got = {"status": observed.status, "stdout": observed.stdout, "stderr": observed.stderr}
+    differing = [name for name in ("status", "stdout", "stderr") if wanted[name] != got[name]]
+    return ", ".join(differing) or None
 
 
 def slug(text: str) -> str:
@@ -422,9 +454,9 @@ def main() -> int:
     sys.stderr.write(f"ran {result.testsRun} tests ({len(result.failures)} failures, {len(result.errors)} errors under the recorder); "
                      f"{len(recorder.records)} recordings, {len(recorder.dropped)} dropped while recording\n")
     unique = {}
-    for test, label, case in recorder.records:
+    for test, label, case, expect in recorder.records:
         key = hashlib.sha256(json.dumps(case, sort_keys=True).encode()).hexdigest()
-        unique.setdefault(key, (test, label, case))
+        unique.setdefault(key, (test, label, case, expect))
     sys.stderr.write(f"{len(unique)} distinct recordings\n")
     from concurrent.futures import ThreadPoolExecutor
 
@@ -439,21 +471,33 @@ def main() -> int:
     def judge(item):
         import shutil
 
-        key, (test, label, row) = item
-        case = harness.Case.from_dict({"id": "probe", "command": label, **row}, "seeded")
-        first, second, labels = replay_twice(root, case)
+        key, (test, label, row, expect) = item
+        try:
+            case = harness.Case.from_dict({"id": "probe", "command": label, **row}, "seeded")
+        except harness.UnsafeCase as error:
+            return key, test, label, row, None, None, [], str(error)
+        try:
+            first, second, labels, places = replay_twice(root, case)
+        except harness.UnsafeCase as error:
+            return key, test, label, row, None, None, [], str(error)
+        differing = reproduces(first, expect, places)
+        if differing:
+            return key, test, label, row, first, second, labels, f"replay doesn't reproduce the test's {differing}"
         command = harness.command_of(row["argv"], labels[-1] if labels else None) or label
-        if command in served and first.served_by:
+        if command in served:
             box = root.box()
             rust_side, _ = harness.run_side(root, "rust", case, box)
             shutil.rmtree(box, True)
-            if rust_side.served_by[-1:] == ["python"]:
+            if rust_side.route == "python":
                 row = {**row, "fallback": True}
-        return key, test, label, row, first, second, labels
+        return key, test, label, row, first, second, labels, None
 
     try:
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            for key, test, label, row, first, second, labels in pool.map(judge, unique.items()):
+            for key, test, label, row, first, second, labels, rejected in pool.map(judge, unique.items()):
+                if rejected:
+                    dropped.append((test, row["argv"], rejected))
+                    continue
                 command = harness.command_of(row["argv"], labels[-1] if labels else None) or label
                 if first.timed_out:
                     dropped.append((test, row["argv"], "Python didn't finish"))
