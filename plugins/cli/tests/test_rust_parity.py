@@ -108,8 +108,8 @@ class HarnessRules(unittest.TestCase):
         try:
             child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], env={**os.environ, "ARDIA_PARITY_BOX": str(box)},
                                      start_new_session=True)
-            self.assertTrue(harness.wait_until(lambda: str(box) in subprocess.run(["/bin/ps", "-x", "-E", "-ww", "-o", "command="], capture_output=True,
-                                                                               text=True).stdout or sys.platform != "darwin", 5))
+            listed = lambda: str(box).encode() in subprocess.run(["/bin/ps", "-x", "-E", "-ww", "-o", "command="], capture_output=True).stdout
+            self.assertTrue(sys.platform != "darwin" or harness.wait_until(listed, 5))
             harness.reap(str(box))
             child.wait(timeout=5)
             self.assertEqual(child.returncode, -signal.SIGKILL)

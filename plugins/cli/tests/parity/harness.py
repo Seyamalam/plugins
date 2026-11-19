@@ -430,7 +430,7 @@ class Installation:
 
 def reap(marker: str) -> None:
     if sys.platform == "darwin":
-        listing = subprocess.run(["/bin/ps", "-x", "-E", "-ww", "-o", "pid=,command="], capture_output=True, text=True).stdout
+        listing = subprocess.run(["/bin/ps", "-x", "-E", "-ww", "-o", "pid=,command="], capture_output=True).stdout.decode("utf-8", "replace")
     else:
         listing = ""
         for entry in Path("/proc").glob("[0-9]*"):
