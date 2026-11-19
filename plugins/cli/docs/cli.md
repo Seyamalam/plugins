@@ -938,11 +938,24 @@ only change needed.
 | `set device\|geo\|media` | `Emulation.setTouchEmulationEnabled`, `Emulation.setUserAgentOverride`, `Emulation.setGeolocationOverride`, `Emulation.setEmulatedMedia` |
 | `set offline`, `set headers` | `Network.emulateNetworkConditions`, `Network.setExtraHTTPHeaders` |
 | `set credentials`, `network route\|unroute` | `Fetch.enable` (and `Fetch.fulfillRequest`, `failRequest`, `continueRequest`) |
-| `upload` | `DOM.setFileInputFiles` |
-| `download <sel> <path>`, `wait --download [path]` | `Browser.setDownloadBehavior` (`wait --download` waits for the next download that starts after it; `download` clicks and saves) |
 | `highlight` | `Overlay.enable`, `Overlay.highlightNode` |
 | `clipboard copy\|paste` | `Input.dispatchKeyEvent` with the `copy`/`paste` editing commands |
 | `clipboard read\|write` | `Browser.grantPermissions` |
+
+### Blocked on purpose
+
+`upload` and `download` are not on that list because they are not pending: Ardia blocks them for the ardia command on
+purpose, and allowing the method is not the plan. The engine's ardia-command client may not read or write local files
+(`MayReadLocalFiles` and `MayWriteLocalFiles` are false for it), so a script or an agent can't put any file on the
+computer into a page or write one anywhere on it.
+
+| Command | Needs | What to do instead |
+| --- | --- | --- |
+| `upload` | `DOM.setFileInputFiles` | Ask the person to choose the file in the page's own file picker, then carry on. |
+| `download <sel> <path>`, `wait --download [path]` | `Browser.setDownloadBehavior` | Ask the person to save the file from the page, then carry on. |
+
+They fail with exit 1 like any refusal (`code: "policy_refused"`, `data.method` the method above, `data.reason`
+empty), and the message says the block is on purpose and what to do instead. `--port` test servers still accept them.
 | `trace start\|stop`, `profiler start\|stop` | `Tracing.start`, `Tracing.end` |
 | `record start\|stop\|restart` | `Page.startScreencast` (and ffmpeg on PATH for the WebM) |
 | `stream enable` | `Page.startScreencast` |

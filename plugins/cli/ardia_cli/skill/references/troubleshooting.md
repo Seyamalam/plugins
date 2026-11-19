@@ -64,10 +64,16 @@ line succeeded. On `stale_ref`, the answer has the new refs.
 
 Ardia's policy doesn't allow the browser methods behind cookies, `state`, `set …` (but `set viewport <w> <h>` works
 on a tab this session opened and never showed: it goes off-screen, and `--show` or `set viewport reset` reloads it
-at its own size), `network route`, `upload`,
-`download`, `highlight`, `clipboard`, `trace`, `profiler`, `record` and `stream`. They fail with exit 1 and name the
-refused method (`code: "policy_refused"` in `--json`). Use `storage local|session`, `eval`, or ask the user to do that
-step. A refusal that says "which Ardia allows for the ardia command, but not …" is about the tab or address, not the
+at its own size), `network route`, `highlight`, `clipboard`, `trace`, `profiler`, `record` and `stream`. They fail
+with exit 1 and name the refused method (`code: "policy_refused"` in `--json`). Use `storage local|session`, `eval`, or
+ask the user to do that step.
+
+`upload` and `download` (and `wait --download`) are blocked on purpose, not pending: the ardia command may not put
+files from the user's computer into a page or write files to it. Don't retry or look for a way round it. For an
+upload, ask the user to choose the file in the page's own file picker; for a download, ask them to save the file from
+the page. Then carry on.
+
+A refusal that says "which Ardia allows for the ardia command, but not …" is about the tab or address, not the
 command: it gives the reason (`data.reason`) and, for a tab, what Ardia has there. Pick another tab or `open` a web page. Not here at all: `connect`, `install`, `upgrade`, `doctor`, `dashboard`, `chat`, `mcp`, `profiles`,
 `confirm`/`deny`, iOS, cloud providers and launch flags (`--headed`, `--profile`, `--proxy`, …).
 

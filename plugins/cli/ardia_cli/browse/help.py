@@ -30,8 +30,8 @@ Core Commands:
   check <sel> / uncheck <sel>  Set a checkbox
   select <sel> <val...>      Pick option(s): a <select>, or a combobox/typeahead (types, picks the match)
   drag <src> <dst>           Drag onto dst's far half, taking its place [--before|--after]
-  upload <sel> <files...>    Upload files                        (gated, see below)
-  download <sel> <path>      Download by clicking element        (gated)
+  upload <sel> <files...>    Upload files                        (blocked on purpose, see below)
+  download <sel> <path>      Download by clicking element        (blocked on purpose, see below)
   scroll [dir] [px]          Scroll (up/down/left/right, default down 300) [-s <sel>]
   scrollintoview <sel>       Scroll element into view
   wait <sel|ms>              Wait for element or time; --text, --url, --load, --fn, --state
@@ -113,6 +113,12 @@ Options:
 Gated: Ardia's ardia-command policy (the engine's token server) doesn't yet allow the CDP
 methods these need, so over the real connection they fail naming the refused method; they
 work against a plain --port test server.
+
+Blocked on purpose: upload and download are blocked on purpose, not pending. Ardia doesn't let
+the ardia command put files from this computer into a page or write files to it, so they fail
+with policy_refused naming DOM.setFileInputFiles or Browser.setDownloadBehavior (`wait --download`
+too). Ask the person to choose the file in the page's own file picker, or to save the download
+from the page.
 
 Not here: connect, inspect, install, upgrade, doctor, dashboard, chat (no AI), mcp, profiles,
 confirm/deny, iOS (-p ios, swipe, tap), cloud providers, and launch options (--headed,
@@ -362,8 +368,12 @@ COMMANDS = {
              "Raw mouse input at viewport coordinates; a held button stays down until `mouse up`.",
     "keydown": "ardia browse keydown <key> | keyup <key>\n\nHolds a key down until keyup (keys and modifiers as press).",
     "keyup": "ardia browse keyup <key>\n\nReleases a key held with keydown.",
-    "upload": "ardia browse upload <sel> <files...>\n\nSets the files of a file input (gated: DOM.setFileInputFiles).",
-    "download": "ardia browse download <sel> <path>\n\nClicks the element and saves the download it starts to path (gated).",
+    "upload": "ardia browse upload <sel> <files...>\n\nSets the files of a file input. Ardia blocks it on purpose (DOM.setFileInputFiles): the ardia command may not\n"
+              "put files from this computer into a page, so it exits 1 with policy_refused. Ask the person to\n"
+              "choose the file in the page's own file picker.",
+    "download": "ardia browse download <sel> <path>\n\nClicks the element and saves the download it starts to path. Ardia blocks it on purpose\n"
+                "(Browser.setDownloadBehavior, which `wait --download` needs too): the ardia command may not write\n"
+                "files to this computer, so it exits 1 with policy_refused. Ask the person to save the file from the page.",
     "cookies": "ardia browse cookies [get] | set <name> <value> [--url u] [--domain d] [--path p] [--httpOnly] [--secure]\n"
                "  [--sameSite Strict|Lax|None] [--expires epoch] | set --curl <file> | clear\n\n"
                "Gated by Ardia's policy; works against a plain --port test server.",

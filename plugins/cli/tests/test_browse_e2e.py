@@ -1989,11 +1989,15 @@ class BrowseTokenPath(unittest.TestCase):
         self.browse("open", self.url("login.html"), session=session)
         for args, method in ((["cookies"], "Network.getCookies"), (["network", "route", "*", "--abort"], "Fetch.enable"),
                              (["set", "geo", "1", "2"], "Emulation.setGeolocationOverride"), (["trace", "start"], "Tracing.start"),
-                             (["upload", "#email", str(FIXTURES / "login.html")], "DOM.setFileInputFiles")):
+                             (["upload", "#email", str(FIXTURES / "login.html")], "DOM.setFileInputFiles"),
+                             (["download", "#email", str(FIXTURES / "never-written.bin")], "Browser.setDownloadBehavior")):
             done = self.browse(*args, session=session, check=False)
             self.assertEqual(done.returncode, 1, args)
             self.assertIn(f"needs {method}", done.stderr)
             self.assertIn("isn't allowed for the ardia command", done.stderr)
+            blocked = args[0] in ("upload", "download")
+            self.assertEqual("blocks on purpose" in done.stderr, blocked, args)
+            self.assertEqual("once the engine's token policy allows it" in done.stderr, not blocked, args)
         data = json.loads(self.browse("cookies", "--json", session=session, check=False).stdout)
         self.assertEqual((data["success"], data["code"], data["data"]), (False, "policy_refused", {"method": "Network.getCookies", "reason": ""}))
 

@@ -53,6 +53,18 @@ def refusal_reason(text: str, method: str) -> str:
     return said.rsplit(method, 1)[1].strip()
 
 
+BLOCKED_ON_PURPOSE = {
+    "DOM.setFileInputFiles": (
+        "it would let the command put any file on this computer into a page",
+        "Ask the person to choose the file in the page's own file picker, then carry on from there",
+    ),
+    "Browser.setDownloadBehavior": (
+        "it would let the command write files anywhere on this computer",
+        "Ask the person to save the file from the page, then carry on from there",
+    ),
+}
+
+
 class Gated(BrowseError):
     def __init__(self, method: str, command: str | None = None, detail: str | None = None, reason: str | None = None):
         self.method = method
@@ -62,6 +74,9 @@ class Gated(BrowseError):
         if self.reason:
             hint = REFUSAL_HINTS.get(self.reason)
             message = f"{what}, which Ardia allows for the ardia command, but not {self.reason} ({self.refusal})" + (f": {hint}" if hint else "")
+        elif method in BLOCKED_ON_PURPOSE:
+            why, instead = BLOCKED_ON_PURPOSE[method]
+            message = f"{what}, which Ardia blocks on purpose for the ardia command ({self.refusal}): {why}. {instead}"
         else:
             message = (
                 f"{what}, which Ardia's ardia-command policy refuses ({self.refusal}). "
