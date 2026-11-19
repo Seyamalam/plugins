@@ -45,7 +45,7 @@ CONTENT_APART = ("data/Telemetry/local", "data/Telemetry/cli-queue.jsonl", "data
 READ_ONLY_METHODS = frozenset({"hello", "workspace", "windows", "commands"})
 ABSENT = "<absent>"
 TIME_KEYS = re.compile(r"(_at|At|_ms|time|Time)$")
-PLAUSIBLE_TIME = 1e9
+TIME_SLACK = 120
 SIDES = ("rust", "python")
 TIMEOUT = 60
 DRAIN_TIMEOUT = 5
@@ -59,10 +59,7 @@ SANDBOX_PROFILE = """(version 1)
 (deny file-write* (require-not (require-any (subpath (param "BOX")) (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") (regex #"^/dev/fd/"))))
 (deny process-exec {denied})
 """
-ROUTE_PROBE = (
-    "import os, sys; log = os.environ.get('ARDIA_PARITY_PYTHON_LOG'); "
-    "log and ' -m ardia_cli ' in ' ' + ' '.join(getattr(sys, 'orig_argv', [])) + ' ' and open(log, 'a').write('python\\n')\n"
-)
+ROUTE_PROBE = "import os as _parity_os\n_parity_os.environ.get('ARDIA_PARITY_PYTHON_LOG') and open(_parity_os.environ['ARDIA_PARITY_PYTHON_LOG'], 'a').write('python\\n')\n"
 
 
 class UnsafeCase(ValueError):
@@ -181,10 +178,12 @@ SKETCH = {"box": "/BOX", "home": "/BOX/home", "cli_home": "/BOX/cli-home", "data
           "outside": "/BOX/outside", "cli": "/CLI"}
 
 
-def contained_path(text: str) -> bool:
+def contained_path(text: str, writable: bool = False) -> bool:
     import posixpath
 
     for name, sketch in SKETCH.items():
+        if writable and name == "cli":
+            continue
         mark = "{" + name + "}"
         if text == mark or text.startswith(mark + "/"):
             root = "/CLI" if name == "cli" else "/BOX"
@@ -208,9 +207,12 @@ def check_case_is_contained(case: Case) -> None:
     for key, value in case.env.items():
         if key in PROTECTED_ENV:
             raise UnsafeCase(f"{where}: ${key} belongs to the sandbox and can't be set or removed by a case")
-        if key == "ARDIA_DATA_DIR" and value is not None and not contained_path(value):
+        if key == "ARDIA_DATA_DIR" and value is not None and not contained_path(value, writable=True):
             raise UnsafeCase(f"{where}: $ARDIA_DATA_DIR must be unset or a {{box}} path, not {value!r}")
-    for token in case.argv:
+    for index, token in enumerate(case.argv):
+        if token == "--data-dir" and index + 1 < len(case.argv) and not contained_path(str(case.argv[index + 1]), writable=True) \
+                or isinstance(token, str) and token.startswith("--data-dir=") and not contained_path(token.split("=", 1)[1], writable=True):
+            raise UnsafeCase(f"{where}: --data-dir must be a {{box}} path")
         if not isinstance(token, str):
             raise UnsafeCase(f"{where}: argv holds {token!r}, not text")
         candidates = [token] + ([token.split("=", 1)[1]] if token.startswith("--") and "=" in token else [])
@@ -244,6 +246,7 @@ class FakeArdia:
         self.replies = {method: list(reply) if isinstance(reply, list) else [reply] for method, reply in replies.items()}
         self.events = events
         self.connections = []
+        self.talkers = []
         self.lock = threading.Lock()
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(str(path))
@@ -266,12 +269,16 @@ class FakeArdia:
         while not self.stopped.is_set():
             try:
                 connection, _ = self.server.accept()
-            except (socket.timeout, OSError):
+            except socket.timeout:
                 continue
+            except OSError:
+                return
             with self.lock:
                 transcript = []
                 self.connections.append(transcript)
-            threading.Thread(target=self.talk, args=(connection, transcript), daemon=True).start()
+                talker = threading.Thread(target=self.talk, args=(connection, transcript), daemon=True)
+                self.talkers.append(talker)
+            talker.start()
 
     def next_reply(self, method):
         if method == "hello":
@@ -317,9 +324,14 @@ class FakeArdia:
             pass
 
     def close(self):
-        self.stopped.set()
         self.server.close()
         self.thread.join(2)
+        deadline = time.monotonic() + DRAIN_TIMEOUT
+        with self.lock:
+            talkers = list(self.talkers)
+        for talker in talkers:
+            talker.join(max(0.0, deadline - time.monotonic()))
+        self.stopped.set()
 
 
 @dataclass
@@ -334,6 +346,7 @@ class Observed:
     usage: object
     files: dict
     helpers: list
+    flush: object = None
     route: str = "rust"
     timed_out: bool = False
 
@@ -374,18 +387,22 @@ def file_changes(before: dict, after: dict) -> dict:
     return changes
 
 
-def scrub_times(value):
+def scrub_times(value, window: tuple[float, float]):
     if isinstance(value, dict):
-        return {key: time_marker(child) if TIME_KEYS.search(key) else scrub_times(child) for key, child in value.items()}
+        return {key: time_marker(child, window) if TIME_KEYS.search(key) else scrub_times(child, window) for key, child in value.items()}
     if isinstance(value, list):
-        return [scrub_times(child) for child in value]
+        return [scrub_times(child, window) for child in value]
     return value
 
 
-def time_marker(value):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < PLAUSIBLE_TIME:
-        return scrub_times(value)
-    return f"<time {type(value).__name__}>"
+def time_marker(value, window: tuple[float, float]):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return scrub_times(value, window)
+    start, end = window
+    for scale, unit in ((1, "s"), (1000, "ms")):
+        if (start - TIME_SLACK) * scale <= value <= (end + TIME_SLACK) * scale:
+            return f"<now {type(value).__name__} {unit}>"
+    return value
 
 
 class Installation:
@@ -402,7 +419,9 @@ class Installation:
         self.packages = Path(subprocess.run([str(self.python), "-I", "-c", "import site; print(site.getsitepackages()[0])"],
                                             check=True, capture_output=True, text=True).stdout.strip())
         (self.packages / "ardia-checkout.pth").write_text("\n".join([str(self.source), *site.getsitepackages()]) + "\n")
-        (self.packages / "ardia-parity-route.pth").write_text(ROUTE_PROBE)
+        entry = self.source / "ardia_cli" / "cli.py"
+        entry.write_text(ROUTE_PROBE + entry.read_text())
+        shutil.copytree(CLI / "tests" / "fixtures", self.source / "tests" / "fixtures")
         subprocess.run([str(self.python), "-I", "-m", "compileall", "-q", str(self.source)], check=True)
         self.profile = self.scratch / "sandbox.sb"
         self.profile.write_text(SANDBOX_PROFILE.format(denied=" ".join(f'(literal "{program}")' for program in DENIED_PROGRAMS)))
@@ -435,12 +454,17 @@ def reap(marker: str) -> None:
         listing = ""
         for entry in Path("/proc").glob("[0-9]*"):
             try:
-                listing += f"{entry.name} " + (entry / "environ").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace") + "\n"
+                exe = os.readlink(entry / "exe")
+            except OSError:
+                exe = ""
+            try:
+                listing += f"{entry.name} {exe} " + ((entry / "cmdline").read_bytes() + b" " + (entry / "environ").read_bytes()).replace(b"\0", b" ").decode("utf-8", "replace") + "\n"
             except OSError:
                 continue
+    pattern = re.compile(rf"(ARDIA_PARITY_BOX=)?{re.escape(marker)}(/|\s|$)")
     for line in listing.splitlines():
         pid_text, _, rest = line.strip().partition(" ")
-        if pid_text.isdigit() and int(pid_text) != os.getpid() and re.search(rf"ARDIA_PARITY_BOX={re.escape(marker)}(/|\s|$)", rest):
+        if pid_text.isdigit() and int(pid_text) != os.getpid() and pattern.search(rest):
             try:
                 os.kill(int(pid_text), signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
@@ -453,7 +477,7 @@ def write_stub(directory: Path, name: str, spec: dict, log: Path):
     script = (
         "#!/bin/sh\n"
         f"printf '%s' \"{name}\" >> '{log}'\n"
-        f"for a in \"$@\"; do printf ' %s' \"$a\" >> '{log}'; done\n"
+        f"for a in \"$@\"; do printf ' %s:%s' \"$(printf '%s' \"$a\" | /usr/bin/wc -c | /usr/bin/tr -d ' ')\" \"$a\" >> '{log}'; done\n"
         f"printf '\\n' >> '{log}'\n"
         f"printf '%s' '{stdout}' | /usr/bin/base64 -d 2>/dev/null || printf '%s' '{stdout}' | /usr/bin/base64 -D\n"
         f"exit {status}\n"
@@ -470,9 +494,34 @@ def inside(box: Path, path: Path) -> bool:
         return False
 
 
+def no_links_below(box: Path, path: Path) -> bool:
+    current = box
+    for part in path.relative_to(box).parts:
+        current = current / part
+        if current.is_symlink():
+            return False
+    return True
+
+
+def make_parents(box: Path, path: Path) -> None:
+    current = box
+    for part in path.relative_to(box).parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise UnsafeCase(f"{path.relative_to(box)} would be written through a link")
+        if not current.exists():
+            current.mkdir()
+
+
+def read_inside(box: Path, path: Path) -> str | None:
+    if not path.exists() or not no_links_below(box, path):
+        return None
+    return path.read_text()
+
+
 def places_of(box: Path) -> dict:
     return {"box": str(box), "home": str(box / "home"), "cli_home": str(box / "cli-home"), "data": str(box / "data"),
-            "cwd": str(box / "cwd"), "tmp": str(box / "tmp"), "outside": str(box / "outside"), "cli": str(CLI)}
+            "cwd": str(box / "cwd"), "tmp": str(box / "tmp"), "outside": str(box / "outside"), "cli": str(box.parent / "src")}
 
 
 def materialize(box: Path, case: Case) -> dict:
@@ -491,9 +540,10 @@ def materialize(box: Path, case: Case) -> dict:
     places = places_of(box)
     for rel, spec in case.files.items():
         path = box / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not inside(box, path.parent):
-            raise UnsafeCase(f"case {case.id!r}: {rel} would be written through a link that leaves the sandbox")
+        try:
+            make_parents(box, path)
+        except UnsafeCase as error:
+            raise UnsafeCase(f"case {case.id!r}: {error}") from None
         if path.is_symlink():
             raise UnsafeCase(f"case {case.id!r}: {rel} would be written through a link")
         if isinstance(spec, dict) and spec.get("dir"):
@@ -506,7 +556,7 @@ def materialize(box: Path, case: Case) -> dict:
         if isinstance(spec, dict) and "mode" in spec:
             path.chmod(int(spec["mode"]))
     flush = telemetry / "cli-flush.json"
-    if not inside(box, flush.parent) or flush.is_symlink():
+    if not no_links_below(box, flush):
         raise UnsafeCase(f"case {case.id!r}: its Telemetry folder leaves the sandbox")
     flush.write_text(json.dumps({"failures": 0, "next_at": 9e12}))
     stubs = box / "stubs"
@@ -557,13 +607,13 @@ def environment(box: Path, places: dict, case: Case) -> dict:
     return env
 
 
-def read_telemetry(data: Path):
+def read_telemetry(box: Path, data: Path):
     local = data / "Telemetry" / "local"
     records = []
-    for path in sorted(local.glob("cli-*.jsonl")) if local.exists() else []:
-        records += [json.loads(line) for line in path.read_text().splitlines()]
-    spool = data / "Telemetry" / "cli-queue.jsonl"
-    queued = [json.loads(line) for line in spool.read_text().splitlines()] if spool.exists() else []
+    for path in sorted(local.glob("cli-*.jsonl")) if local.exists() and no_links_below(box, local) else []:
+        records += [json.loads(line) for line in (read_inside(box, path) or "").splitlines()]
+    spool_text = read_inside(box, data / "Telemetry" / "cli-queue.jsonl")
+    queued = [json.loads(line) for line in spool_text.splitlines()] if spool_text else []
     served = [record.get("properties", {}).get("served_by") for record in records if record.get("event") == "cli_command"]
     labels = [" ".join(part for part in (record.get("properties", {}).get("command"), record.get("properties", {}).get("subcommand")) if part)
               for record in records if record.get("event") == "cli_command"]
@@ -583,6 +633,7 @@ def run_side(install: Installation, side: str, case: Case, box: Path) -> tuple[O
         fake = FakeArdia(box / "data" / "ArdiaControl.sock", expand(control.get("hello", DEFAULT_HELLO), places),
                          expand(control.get("replies", {}), places), expand(control.get("events", []), places))
     before = tree(box)
+    started = time.time()
     stdin = decode_blob(expand(case.stdin, places) if isinstance(case.stdin, str) else case.stdin)
     timed_out = False
     try:
@@ -608,16 +659,19 @@ def run_side(install: Installation, side: str, case: Case, box: Path) -> tuple[O
         if fake:
             fake.close()
         reap(str(box))
+    window = (started, time.time())
     after = tree(box)
-    records, queued, served, labels = read_telemetry(box / "data")
-    usage_path = box / "cli-home" / "Usage" / "usage.json"
-    usage = scrub_times(json.loads(usage_path.read_text())) if usage_path.exists() else None
-    log = box / "helpers.log"
-    helpers = log.read_text().splitlines() if log.exists() else []
+    records, queued, served, labels = read_telemetry(box, box / "data")
+    usage_text = read_inside(box, box / "cli-home" / "Usage" / "usage.json")
+    usage = scrub_times(json.loads(usage_text), window) if usage_text is not None else None
+    flush_text = read_inside(box, box / "data" / "Telemetry" / "cli-flush.json")
+    flush = scrub_times(json.loads(flush_text), window) if flush_text else flush_text
+    log_text = read_inside(box, box / "helpers.log")
+    helpers = log_text.splitlines() if log_text else []
     route_log = box / "route.log"
     route = "python" if route_log.exists() and route_log.read_text().strip() else "rust"
     observed = Observed(stdout, stderr, process.returncode, fake.transcript() if fake else [], records, queued, served, usage,
-                        file_changes(before, after), helpers, route, timed_out)
+                        file_changes(before, after), helpers, flush, route, timed_out)
     return apply_normalizers(observed, case, places), labels
 
 
@@ -654,7 +708,7 @@ def text_of(value) -> str:
     return json.dumps(value, indent=1, sort_keys=True, ensure_ascii=False, default=str)
 
 
-FIELDS = ("status", "stdout", "stderr", "requests", "telemetry", "queued", "usage", "files", "helpers", "timed_out")
+FIELDS = ("status", "stdout", "stderr", "requests", "telemetry", "queued", "usage", "flush", "files", "helpers", "timed_out")
 
 
 def read_only(connection: list) -> bool:
@@ -663,9 +717,17 @@ def read_only(connection: list) -> bool:
 
 def fallback_requests(rust: list, python: list) -> list:
     extra = len(rust) - len(python)
-    if extra > 0 and rust[extra:] == python and all(read_only(connection) for connection in rust[:extra]):
+    if extra > 0 and exact(rust[extra:]) == exact(python) and all(read_only(connection) for connection in rust[:extra]):
         return python
     return rust
+
+
+def exact(value):
+    if isinstance(value, bytes):
+        return ("bytes", value)
+    if isinstance(value, dict) and all(isinstance(change, tuple) for change in value.values()):
+        return json.dumps({rel: [part.decode("latin-1") if isinstance(part, bytes) else part for part in change] for rel, change in value.items()}, sort_keys=True)
+    return json.dumps(value, sort_keys=True, default=repr)
 
 
 def compare(rust: Observed, python: Observed, fallback: bool = False) -> list[tuple[str, str]]:
@@ -674,7 +736,7 @@ def compare(rust: Observed, python: Observed, fallback: bool = False) -> list[tu
         left, right = getattr(python, name), getattr(rust, name)
         if name == "requests" and fallback:
             right = fallback_requests(right, left)
-        if left == right:
+        if exact(left) == exact(right):
             continue
         diff = "\n".join(difflib.unified_diff(text_of(left).splitlines(), text_of(right).splitlines(), "python", "rust", lineterm=""))
         mismatches.append((name, diff or f"python {left!r}\nrust   {right!r}"))

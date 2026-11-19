@@ -1659,12 +1659,14 @@ of them ran natively; anything else, and any input the Rust code can't mirror ex
 case (`tests/parity/cases/*.json`, one row each) gives argv, stdin, environment, the starting files, the control
 socket's replies (or no socket), consent and helper stubs; it may only name paths inside its sandbox and can't touch the
 sandbox's own variables. `python -m tests.parity` runs each case on both sides in the same throwaway HOME, CLI home and
-data dir, under `sandbox-exec` on macOS (writes, Unix sockets and the started programs stay in the sandbox; no IP
-network; `launchctl`, `security`, `codesign`, `osascript`, `open` and the like can't run), with helpers stubbed on PATH,
-and kills whatever either side left running. Elsewhere it runs only on a throwaway machine (`CI=true`, or
-`ARDIA_PARITY_UNSANDBOXED=1`). It compares stdout, stderr, exit code, each control-socket connection's requests (ids and
-params as sent), telemetry, usage, the files written (with modes) and the helpers started, byte for byte, with a diff
-for each mismatch, and it knows which side served a call from whether the bundled Python started, not from telemetry. A
+data dir, from a copy of `ardia_cli` and the test fixtures in scratch, with helpers stubbed on PATH. On macOS both sides
+run under `sandbox-exec`: writes and Unix-socket connections stay inside the case's folder, there is no IP network, and
+`launchctl`, `security`, `codesign`, `osascript`, `open` and the like can't run; reading the host's files and reaching
+system services are still allowed. Elsewhere it runs only on a throwaway machine (`CI=true`, or
+`ARDIA_PARITY_UNSANDBOXED=1`), relying on the case checks alone. Afterwards it kills whatever either side left running
+that carries the case's folder in its command line or environment, or runs from the harness's own install. It compares stdout, stderr, exit code, each control-socket connection's requests (ids and
+params as sent), telemetry, usage, the flush state, the files written (with modes) and the helpers started (each argument whole), byte for byte, with a diff
+for each mismatch, and it knows which side served a call from whether the bundled Python's `ardia_cli.cli` was imported, not from telemetry. A
 case marked `fallback` is one Rust must hand to Python; before handing off, Rust may only have asked read-only questions
 (`hello`, `workspace`, `windows`, `commands`). `--command NAME` and `--case ID` narrow a run, `--keep` keeps both
 sandboxes, and `--report` prints the table as JSON (per command: cases, passing, native, served) for a given commit.

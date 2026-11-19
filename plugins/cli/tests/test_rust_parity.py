@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -84,9 +85,41 @@ class HarnessRules(unittest.TestCase):
         self.assertEqual(harness.fallback_requests(mutate_first, python), mutate_first)
         self.assertNotEqual([[(2, "windows", None)]], [[(2, "windows", harness.ABSENT)]])
 
-    def test_times_are_scrubbed_only_when_they_look_like_times(self):
-        scrubbed = harness.scrub_times({"last_at": 1_763_500_000.5, "first_ms": 1_763_500_000_000, "next_at": 0, "open_at": False, "done_at": None, "count": 5})
-        self.assertEqual(scrubbed, {"last_at": "<time float>", "first_ms": "<time int>", "next_at": 0, "open_at": False, "done_at": None, "count": 5})
+    def test_times_are_scrubbed_only_when_they_are_now(self):
+        window = (1_763_500_000.0, 1_763_500_001.0)
+        scrubbed = harness.scrub_times({"last_at": 1_763_500_000.5, "first_ms": 1_763_500_000_000, "next_at": 0, "open_at": False, "done_at": None,
+                                        "count": 5, "later_at": 9_999_999_999.0, "earlier_at": 1_700_000_000}, window)
+        self.assertEqual(scrubbed, {"last_at": "<now float s>", "first_ms": "<now int ms>", "next_at": 0, "open_at": False, "done_at": None,
+                                    "count": 5, "later_at": 9_999_999_999.0, "earlier_at": 1_700_000_000})
+
+    def test_comparisons_keep_json_types(self):
+        self.assertNotEqual(harness.exact([[(True, "hello", harness.ABSENT)]]), harness.exact([[(1, "hello", harness.ABSENT)]]))
+        self.assertNotEqual(harness.exact({"usage": True}), harness.exact({"usage": 1}))
+        self.assertNotEqual(harness.exact({"n": 1.0}), harness.exact({"n": 1}))
+
+    def test_fixtures_are_never_written_through_a_link(self):
+        outside = Path(tempfile.mkdtemp(prefix="arpout", dir="/tmp")).resolve()
+        box = Path(tempfile.mkdtemp(prefix="arpbox", dir="/tmp")).resolve() / "c1"
+        try:
+            case = self.case(files={"data/away": {"link": str(outside)}, "data/away/sub/file": "x"})
+            with self.assertRaises(harness.UnsafeCase):
+                harness.materialize(box, case)
+            self.assertEqual(list(outside.iterdir()), [])
+        finally:
+            shutil.rmtree(outside, True)
+            shutil.rmtree(box.parent, True)
+
+    def test_helpers_log_each_argument_whole(self):
+        scratch = Path(tempfile.mkdtemp(prefix="arpstub", dir="/tmp"))
+        try:
+            log = scratch / "log"
+            harness.write_stub(scratch, "tool", {}, log)
+            subprocess.run([str(scratch / "tool"), "a b"], check=True, capture_output=True)
+            subprocess.run([str(scratch / "tool"), "a", "b"], check=True, capture_output=True)
+            first, second = log.read_text().splitlines()
+            self.assertNotEqual(first, second)
+        finally:
+            shutil.rmtree(scratch, True)
 
     @unittest.skipUnless(sys.platform == "darwin", "sandbox-exec is macOS's")
     def test_the_sandbox_keeps_writes_sockets_and_helpers_inside(self):
@@ -102,6 +135,18 @@ class HarnessRules(unittest.TestCase):
             self.assertIn("launchctl-denied", done.stdout)
         finally:
             install.close()
+
+    @unittest.skipUnless(binary(), "needs the Rust ardia")
+    def test_detached_children_of_the_installation_are_reaped_whatever_their_environment(self):
+        install = harness.Installation(binary())
+        try:
+            child = subprocess.Popen([str(install.python), "-c", "import time; time.sleep(30)"], env={}, start_new_session=True)
+            listed = lambda: str(install.scratch).encode() in subprocess.run(["/bin/ps", "-x", "-ww", "-o", "command="], capture_output=True).stdout
+            self.assertTrue(sys.platform != "darwin" or harness.wait_until(listed, 5))
+        finally:
+            install.close()
+        child.wait(timeout=5)
+        self.assertEqual(child.returncode, -signal.SIGKILL)
 
     def test_detached_children_are_reaped(self):
         box = Path(tempfile.mkdtemp(prefix="reap", dir="/tmp")).resolve()
@@ -119,11 +164,25 @@ class HarnessRules(unittest.TestCase):
 
 @unittest.skipUnless(binary(), "build plugins/cli/rust first (cargo build) or set ARDIA_RUST_CLI")
 class HarnessCatches(unittest.TestCase):
+    def test_the_seeder_refuses_a_secret_inside_a_binary_fixture(self):
+        from parity import record
+
+        recorder = record.Recorder()
+        recorder.baseline = {"ARDIA_WS": "ws://127.0.0.1:9/devtools/browser/x?token=parity-secret-1234567890"}
+        case = {"argv": ["windows"], "env": {}, "files": {"data/blob": {"base64": base64.b64encode(b"\x00\xff" + recorder.baseline["ARDIA_WS"].encode()).decode()}}}
+        with self.assertRaises(record.Skip):
+            recorder.check_private(case)
     def test_a_binary_that_hands_everything_to_python_proves_nothing(self):
+        for launch in ('-I -m ardia_cli "$@"', '-I -c "import runpy, sys; sys.argv[0] = \'ardia\'; runpy.run_module(\'ardia_cli\', run_name=\'__main__\')" "$@"',
+                       '-I -c "import sys; from ardia_cli.cli import main; sys.exit(main(sys.argv[1:]))" ardia "$@"'):
+            with self.subTest(launch=launch):
+                self.impostor_fails(launch)
+
+    def impostor_fails(self, launch):
         scratch = Path(tempfile.mkdtemp(prefix="arh", dir="/tmp"))
         try:
             impostor = scratch / "ardia"
-            impostor.write_text('#!/bin/sh\nhere=$(cd "$(dirname "$0")/.." && pwd)\nexec "$here/python/bin/python3" -I -m ardia_cli "$@"\n')
+            impostor.write_text('#!/bin/sh\nhere=$(cd "$(dirname "$0")/.." && pwd)\nexec "$here/python/bin/python3" ' + launch + '\n')
             impostor.chmod(0o755)
             cases = [case for case in harness.load_cases() if case.id in ("version--version", "windows--windows") or case.id.startswith("tabs--tabs-json")]
             self.assertTrue(cases)
